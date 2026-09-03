@@ -121,7 +121,7 @@ guard = GuardInterface()
 # Hook 1: Register initial task description and plan
 task_description = "Locate item in WebShop and complete purchase"
 proposed_plan = "1. Search for item\n2. Select options\n3. Click buy now"
-guard.on_plan_proposed(task_description, proposed_plan)
+guard.on_plan_proposed(task_description, proposed_plan, metadata={"task_id": "webshop_01"})
 
 # Hook 2: Process execution steps inside the agent loop
 history = []
@@ -129,20 +129,33 @@ step_record = {
     "step_index": 0,
     "reasoning": "Search for blue cotton sweater in size medium",
     "action_name": "search",
-    "action_args": "blue cotton sweater medium",
+    "action_args": {"query": "blue cotton sweater medium"},
     "tool_response": "Found 15 items"
 }
 
-res = guard.on_step(step_record, history)
+res = guard.on_step(step_record, history, metadata={"task_id": "webshop_01"})
 
-if res.get("flagged"):
-    print(f"Flagged category: {res['match_details']['category']}")
-    print(f"Confidence: {res['match_details']['confidence']}")
+# Primary recommended field for simple integrations:
+if res["flagged"]:
+    print(f"Warning: {res['warning']}")
+
+# Advanced inspection path:
+if res.get("match_details"):
+    print(f"Pattern Match: {res['match_details']['category']} ({res['match_details']['confidence']:.2f})")
+if res.get("drift_detected"):
+    print(f"Drift Signals: {res['drift_assessment']['triggered_signals']}")
+if res.get("reflection_result", {}).get("revision_suggested"):
+    print(f"Plan Invalidation: {res['reflection_result']['revision_reasoning']}")
 
 history.append(step_record)
 
 # Hook 3: Fire on subgoal completion or transition
-guard.on_subgoal_boundary(subgoal_id="subgoal_1", status="completed")
+guard.on_subgoal_boundary(
+    subgoal_id="subgoal_1",
+    subgoal_status="completed",
+    step_history=history,
+    metadata={"task_id": "webshop_01"},
+)
 
 # Hook 4: Finalize run and retrieve root-cause attribution
 summary = guard.on_run_end(
@@ -150,9 +163,35 @@ summary = guard.on_run_end(
     trajectory={"steps": history}
 )
 
+print(f"Root Cause Source: {summary['root_cause_source']}")  # 'pattern_match' | 'drift_monitor' | 'reflector' | 'none'
 print(f"Root Cause Category: {summary['root_cause_error_type']}")
 print(f"Root Cause Step Index: {summary['root_cause_step_index']}")
 ```
+
+---
+
+## Known Limitations
+
+### Semantic / Logical Constraint Checking
+The current detection engine (combining TF-IDF centroid pattern matching, keyword rule matching, and structural loop heuristics) detects known error patterns, action repetitions, unresponsive tool responses, subgoal progression stalls, and plan divergence. 
+
+However, **it cannot detect arbitrary semantic or logical constraint violations where execution is syntactically valid and free of error keywords**.
+
+* **Concrete Example:**
+  Suppose a user requests:
+  > *"Book a flight arriving strictly before 10:00 AM on Monday with zero layovers."*
+
+  If the agent executes an action:
+  ```json
+  {
+    "action_name": "select_flight",
+    "action_args": {"flight_id": "FL-402", "arrival_time": "11:45 AM", "day": "Monday", "layovers": 1},
+    "tool_response": "Flight FL-402 reserved successfully."
+  }
+  ```
+  The syntax is valid, tool execution succeeds without errors, and no failure keywords or known centroid patterns match. The system cannot currently verify that `11:45 AM` contradicts the task constraint `before 10:00 AM`, or that `1 layover` violates `zero layovers`.
+* **Roadmap:**
+  Semantic constraint verification is a known gap reserved for a future verification layer (e.g. an LLM-based formal constraint checker or AST state invariant validator), not implemented in this version.
 
 ---
 

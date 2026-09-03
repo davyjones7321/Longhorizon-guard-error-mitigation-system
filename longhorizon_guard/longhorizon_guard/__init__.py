@@ -2,7 +2,7 @@
 longhorizon_guard: Long-horizon agent error mitigation system.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from longhorizon_guard.interface import GuardInterface
 from longhorizon_guard.subgoals.tracker import SubgoalTracker

@@ -3,6 +3,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from longhorizon_guard import __version__
 from longhorizon_guard.interface import GuardInterface
 
 def main():
@@ -49,7 +50,7 @@ def main():
 
     elif args.command == "info" or not args.command:
         guard = GuardInterface()
-        print(f"LongHorizon Guard v0.1.0 Ready")
+        print(f"LongHorizon Guard v{__version__} Ready")
         print(f"  Loaded Patterns: {len(guard._matcher._patterns)}")
         print(f"  Broad-Corpus IDF Terms: {len(guard._matcher._idf)}")
         timeout_val = getattr(guard, "timeout", getattr(guard, "_timeout", 2.0))

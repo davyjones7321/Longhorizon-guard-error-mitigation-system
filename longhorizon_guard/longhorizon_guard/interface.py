@@ -60,6 +60,57 @@ DEFAULT_CATEGORY_THRESHOLDS: Dict[str, float] = {
     "other":            0.50,
 }
 
+
+def _derive_error_type_from_drift(drift_info: Dict[str, Any]) -> str:
+    """Map drift monitor diagnostic signals to a taxonomy error category.
+
+    Signal Mappings:
+      - REPEATED_STALLED_SUBGOALS: Agent forced to advance repeatedly without completing
+        subgoals, indicating an unachievable plan or flawed task decomposition -> planning_error.
+      - ACCUMULATED_SUBGOAL_FAILURES: Multiple subgoals explicitly failed -> planning_error.
+      - SLOW_PROGRESS_RATIO: Inefficient wandering or stuck in single subgoal without progress -> planning_error.
+      - PATTERN_REPETITION_DRIFT: Repeated action repetition or failure patterns -> reflection_error.
+      - Default fallback: planning_error (drift monitor tracks plan divergence).
+    """
+    signals = set(drift_info.get("triggered_signals") or [])
+    if "PATTERN_REPETITION_DRIFT" in signals:
+        return "reflection_error"
+    if "REPEATED_STALLED_SUBGOALS" in signals or "ACCUMULATED_SUBGOAL_FAILURES" in signals or "SLOW_PROGRESS_RATIO" in signals:
+        return "planning_error"
+    reasons = " ".join(drift_info.get("reasons") or []).lower()
+    if "tool" in reasons:
+        return "tool_use_error"
+    if "memory" in reasons:
+        return "memory_error"
+    if "reflection" in reasons:
+        return "reflection_error"
+    return "planning_error"
+
+
+def _derive_error_type_from_reflection(refl_info: Dict[str, Any]) -> str:
+    """Map reflector revision diagnostics to a taxonomy error category.
+
+    Inspects evidence sources and revision reasoning text:
+      - If reasoning cites planning or subgoal failures -> planning_error.
+      - If reasoning cites reflection or repeated mistakes -> reflection_error.
+      - If reasoning cites memory or forgot -> memory_error.
+      - If reasoning cites tool failure -> tool_use_error.
+      - Default: "plan_deviation" (fallback when no specific category applies).
+    """
+    evidence = [str(s).lower() for s in (refl_info.get("evidence_sources") or [])]
+    reasoning = (refl_info.get("revision_reasoning") or "").lower()
+    combined = f"{' '.join(evidence)} {reasoning}"
+
+    if "planning" in combined or "subgoal" in combined or "goal" in combined:
+        return "planning_error"
+    if "reflection" in combined or "feedback" in combined:
+        return "reflection_error"
+    if "memory" in combined or "forgot" in combined:
+        return "memory_error"
+    if "tool" in combined:
+        return "tool_use_error"
+    return "plan_deviation"
+
 # Maximum time (seconds) for a single matching call before we bail.
 DEFAULT_MATCH_TIMEOUT_SECONDS: float = 2.0
 
@@ -703,18 +754,23 @@ class GuardInterface:
         history: List[Dict[str, Any]],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Primary hook: check each step for pattern/rule matches.
+        """Primary hook: check each step for pattern/rule matches, drift, and plan reflection.
 
         Returns:
             {
                 "continue_execution": bool,
+                "flagged": bool,              # True if any sub-system flagged this step
                 "drift_detected": bool,
                 "warning": str | None,
-                "match_details": dict | None  # structured match info
+                "match_details": dict | None, # structured match info
+                "subgoal_state": dict | None,
+                "drift_assessment": dict | None,
+                "reflection_result": dict | None
             }
         """
         result: Dict[str, Any] = {
             "continue_execution": True,
+            "flagged": False,
             "drift_detected": False,
             "warning": None,
             "match_details": None,
@@ -727,56 +783,54 @@ class GuardInterface:
                 if sub_res.get("transition_event"):
                     result["subgoal_transition"] = sub_res["transition_event"]
 
-            if self._matcher is None:
-                return result
-
             run_id = (metadata or {}).get("run_id", "unknown")
             step_idx = step_record.get("step_index", -1)
             ts = time.strftime("%Y-%m-%dT%H:%M:%S")
 
-            # Build text for pattern matching (Layer A & B): reasoning + action ONLY
-            # Excludes tool_response to prevent environment prompt boilerplate false matches
-            reasoning = step_record.get("reasoning", "") or ""
-            action_name = step_record.get("action_name", "") or ""
-            action_args = str(step_record.get("action_args", "")) or ""
+            if self._matcher is not None:
+                # Build text for pattern matching (Layer A & B): reasoning + action ONLY
+                # Excludes tool_response to prevent environment prompt boilerplate false matches
+                reasoning = step_record.get("reasoning", "") or ""
+                action_name = step_record.get("action_name", "") or ""
+                action_args = str(step_record.get("action_args", "")) or ""
 
-            combined_text = f"{reasoning} {action_name} {action_args}"
+                combined_text = f"{reasoning} {action_name} {action_args}"
 
-            # --- Layer A + B via PatternMatcher ---
-            match = self._matcher.match(combined_text, run_id=run_id, step_index=step_idx)
+                # --- Layer A + B via PatternMatcher ---
+                match = self._matcher.match(combined_text, run_id=run_id, step_index=step_idx)
 
-            # --- Structural heuristics (always run) ---
-            if not match.matched:
-                structural = _detect_action_repetition(step_record, history)
-                if structural is None:
-                    structural = _detect_nothing_happens_loop(step_record, history)
-                if structural and structural.matched:
-                    match = structural
-                    logger.info(
-                        "structural_match run_id=%s step=%d category=%s confidence=%.3f "
-                        "rule_id=%s description=%s timestamp=%s",
-                        run_id, step_idx, match.category, match.confidence,
-                        match.rule_id, match.description, ts,
+                # --- Structural heuristics (always run) ---
+                if not match.matched:
+                    structural = _detect_action_repetition(step_record, history)
+                    if structural is None:
+                        structural = _detect_nothing_happens_loop(step_record, history)
+                    if structural and structural.matched:
+                        match = structural
+                        logger.info(
+                            "structural_match run_id=%s step=%d category=%s confidence=%.3f "
+                            "rule_id=%s description=%s timestamp=%s",
+                            run_id, step_idx, match.category, match.confidence,
+                            match.rule_id, match.description, ts,
+                        )
+
+                if match.matched:
+                    result["drift_detected"] = True
+                    result["warning"] = (
+                        f"[{match.layer}:{match.rule_id or match.pattern_id}] "
+                        f"{match.category} (confidence={match.confidence:.2f}): {match.description}"
                     )
-
-            if match.matched:
-                result["drift_detected"] = True
-                result["warning"] = (
-                    f"[{match.layer}:{match.rule_id or match.pattern_id}] "
-                    f"{match.category} (confidence={match.confidence:.2f}): {match.description}"
-                )
-                result["match_details"] = {
-                    "timestamp": ts,
-                    "run_id": run_id,
-                    "step_index": step_idx,
-                    "category": match.category,
-                    "confidence": match.confidence,
-                    "layer": match.layer,
-                    "pattern_id": match.pattern_id,
-                    "rule_id": match.rule_id,
-                    "description": match.description,
-                    "safe_alternative": match.safe_alternative,
-                }
+                    result["match_details"] = {
+                        "timestamp": ts,
+                        "run_id": run_id,
+                        "step_index": step_idx,
+                        "category": match.category,
+                        "confidence": match.confidence,
+                        "layer": match.layer,
+                        "pattern_id": match.pattern_id,
+                        "rule_id": match.rule_id,
+                        "description": match.description,
+                        "safe_alternative": match.safe_alternative,
+                    }
 
             # Evaluate incremental drift in DriftMonitor
             if self._drift_monitor is not None:
@@ -818,6 +872,13 @@ class GuardInterface:
                 (metadata or {}).get("run_id", "?"),
                 step_record.get("step_index", -1),
             )
+        finally:
+            # FIX C: flagged convenience field across all 3 sub-systems
+            is_matched = result.get("match_details") is not None
+            is_drift = bool(result.get("drift_detected"))
+            refl = result.get("reflection_result")
+            is_refl_revision = bool(refl and refl.get("revision_suggested"))
+            result["flagged"] = is_matched or is_drift or is_refl_revision
 
         return result
 
@@ -826,8 +887,9 @@ class GuardInterface:
     def on_subgoal_boundary(
         self,
         subgoal_id: str,
-        subgoal_status: str,
-        step_history: List[Dict[str, Any]],
+        subgoal_status: str = "completed",
+        step_history: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Hook called when a subgoal checkpoint boundary is reached (Layer 4 - Subgoal Tracker).
 
@@ -840,6 +902,7 @@ class GuardInterface:
                 "reflection_result": dict | None
             }
         """
+        step_history = step_history or []
         result: Dict[str, Any] = {
             "checkpoint_passed": (subgoal_status in ("completed", "stalled_advanced")),
             "next_subgoal": None,
@@ -882,26 +945,43 @@ class GuardInterface:
 
     def on_run_end(
         self,
-        run_metadata: Dict[str, Any],
-        trajectory: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        trajectory: Optional[Dict[str, Any]] = None,
+        *,
+        run_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Post-run summary: scan full trajectory for flags and finalize subgoal report.
+
+        Root-Cause Fallback Chain:
+          Tier 1 ("pattern_match"): Earliest step producing pattern-matcher or structural rule match_details.
+          Tier 2 ("drift_monitor"): Earliest step triggering drift_detected=True, mapped from triggered_signals.
+          Tier 3 ("reflector"): Earliest step where revision_suggested=True, mapped from reasoning/evidence.
+          Tier 4 ("none"): Clean run with no failure signals detected across all 3 layers.
 
         Returns:
             {
                 "processed": bool,
                 "root_cause_step_index": int | None,
                 "root_cause_error_type": str | None,
+                "root_cause_source": str,  # "pattern_match" | "drift_monitor" | "reflector" | "none"
                 "flags_summary": list[dict],
                 "subgoals_summary": dict | None,
                 "drift_summary": dict | None,
                 "reflection_summary": dict | None
             }
         """
+        if metadata is None and run_metadata is not None:
+            metadata = run_metadata
+        if metadata is None:
+            metadata = {}
+        if trajectory is None:
+            trajectory = {}
+
         result: Dict[str, Any] = {
             "processed": True,
             "root_cause_step_index": None,
             "root_cause_error_type": None,
+            "root_cause_source": "none",
             "flags_summary": [],
             "subgoals_summary": None,
             "drift_summary": None,
@@ -909,11 +989,11 @@ class GuardInterface:
         }
         try:
             if self._subgoal_tracker is not None:
-                result["subgoals_summary"] = self._subgoal_tracker.finalize_run(run_metadata, trajectory)
+                result["subgoals_summary"] = self._subgoal_tracker.finalize_run(metadata, trajectory)
 
             if self._drift_monitor is not None:
                 result["drift_summary"] = self._drift_monitor.finalize_run(
-                    run_metadata, trajectory, result.get("subgoals_summary")
+                    metadata, trajectory, result.get("subgoals_summary")
                 )
 
             steps = trajectory.get("steps", [])
@@ -928,56 +1008,99 @@ class GuardInterface:
                 )
                 result["reflection_summary"] = last_refl.to_dict()
 
-            if self._matcher is None:
-                return result
-
-            run_id = run_metadata.get("run_id", "unknown")
+            run_id = metadata.get("run_id", "unknown")
             steps = trajectory.get("steps", [])
 
-            # Scan all steps in order and collect flags
-            # Root-cause rule (per MASTER doc): earliest tagged step, not highest-confidence
-            best_match: Optional[MatchResult] = None
-            best_step_idx: Optional[int] = None
+            # Track earliest candidate across each layer:
+            earliest_pattern_match: Optional[Dict[str, Any]] = None
+            earliest_pattern_step_idx: Optional[int] = None
+
+            earliest_drift_assessment: Optional[Dict[str, Any]] = None
+            earliest_drift_step_idx: Optional[int] = None
+
+            earliest_refl_result: Optional[Dict[str, Any]] = None
+            earliest_refl_step_idx: Optional[int] = None
+
             all_flags: List[Dict[str, Any]] = []
             history: List[Dict[str, Any]] = []
 
             for step in steps:
-                step_result = self.on_step(step, history, metadata=run_metadata)
+                step_result = self.on_step(step, history, metadata=metadata)
+                s_idx = step.get("step_index", len(history))
+
+                # 1. Pattern Matcher / Structural Detection
                 if step_result.get("match_details"):
                     details = step_result["match_details"]
                     all_flags.append(details)
-                    # Earliest-step selection: take the FIRST step that produced a match
-                    if best_match is None:
-                        best_step_idx = details["step_index"]
-                        best_match = MatchResult(
-                            matched=True,
-                            category=details["category"],
-                            confidence=details["confidence"],
-                            layer=details["layer"],
-                            pattern_id=details.get("pattern_id", ""),
-                            rule_id=details.get("rule_id", ""),
-                            description=details.get("description", ""),
-                        )
-                history.append(step)
+                    if earliest_pattern_match is None:
+                        earliest_pattern_step_idx = details.get("step_index", s_idx)
+                        earliest_pattern_match = details
 
-            if best_match and best_match.matched:
-                result["root_cause_step_index"] = best_step_idx
-                result["root_cause_error_type"] = best_match.category
+                # 2. Drift Monitor Signal
+                drift_info = step_result.get("drift_assessment") or {}
+                if step_result.get("drift_detected") or drift_info.get("drift_detected"):
+                    if earliest_drift_assessment is None:
+                        earliest_drift_step_idx = drift_info.get("step_index", s_idx)
+                        earliest_drift_assessment = drift_info
+
+                # 3. Reflector Signal
+                refl_info = step_result.get("reflection_result") or {}
+                if refl_info.get("revision_suggested"):
+                    if earliest_refl_result is None:
+                        earliest_refl_step_idx = refl_info.get("step_index", s_idx)
+                        earliest_refl_result = refl_info
+
+                history.append(step)
 
             result["flags_summary"] = all_flags
 
+            # Fallback Chain Application:
+            # Tier 1: Pattern Matcher / Structural Rules
+            if earliest_pattern_match is not None:
+                result["root_cause_step_index"] = earliest_pattern_step_idx
+                result["root_cause_error_type"] = earliest_pattern_match["category"]
+                result["root_cause_source"] = "pattern_match"
+
+            # Tier 2: Drift Monitor Signals
+            elif earliest_drift_assessment is not None:
+                result["root_cause_step_index"] = earliest_drift_step_idx
+                result["root_cause_error_type"] = _derive_error_type_from_drift(earliest_drift_assessment)
+                result["root_cause_source"] = "drift_monitor"
+
+            # Tier 3: Plan Reflector Signals
+            elif earliest_refl_result is not None or (
+                result.get("reflection_summary") and result["reflection_summary"].get("revision_suggested")
+            ):
+                if earliest_refl_result is not None:
+                    target_refl = earliest_refl_result
+                    target_step = earliest_refl_step_idx
+                else:
+                    target_refl = result["reflection_summary"]
+                    target_step = steps[-1].get("step_index", len(steps) - 1) if steps else 0
+
+                result["root_cause_step_index"] = target_step
+                result["root_cause_error_type"] = _derive_error_type_from_reflection(target_refl)
+                result["root_cause_source"] = "reflector"
+
+            # Tier 4: Clean Run
+            else:
+                result["root_cause_step_index"] = None
+                result["root_cause_error_type"] = None
+                result["root_cause_source"] = "none"
+
             logger.info(
                 "on_run_end run_id=%s total_steps=%d flags=%d "
-                "root_cause=%s root_step=%s",
+                "root_cause=%s root_step=%s root_source=%s",
                 run_id, len(steps), len(all_flags),
                 result["root_cause_error_type"],
                 result["root_cause_step_index"],
+                result["root_cause_source"],
             )
 
         except Exception:
             logger.exception(
                 "on_run_end error — failing open, run_id=%s",
-                run_metadata.get("run_id", "?"),
+                (metadata or {}).get("run_id", "?"),
             )
 
         return result

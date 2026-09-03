@@ -440,15 +440,151 @@ class TestOnRunEnd:
             ]
         }
         step_returns = [
-            {"match_details": None},
-            {"match_details": {"step_index": 1, "category": "planning_error", "confidence": 0.35, "layer": "cluster"}},
-            {"match_details": {"step_index": 2, "category": "tool_use_error", "confidence": 0.95, "layer": "structural"}},
+            {"match_details": None, "drift_detected": False, "reflection_result": None},
+            {"match_details": {"step_index": 1, "category": "planning_error", "confidence": 0.35, "layer": "cluster"}, "drift_detected": False},
+            {"match_details": {"step_index": 2, "category": "tool_use_error", "confidence": 0.95, "layer": "structural"}, "drift_detected": False},
         ]
         with patch.object(guard, "on_step", side_effect=step_returns):
-            result = guard.on_run_end(run_metadata={"run_id": "test_earliest"}, trajectory=trajectory)
+            result = guard.on_run_end(metadata={"run_id": "test_earliest"}, trajectory=trajectory)
             assert result["root_cause_step_index"] == 1
             assert result["root_cause_error_type"] == "planning_error"
+            assert result["root_cause_source"] == "pattern_match"
             assert len(result["flags_summary"]) == 2
+
+    # ---- Tests for FIX A: 4-tier fallback chain & root_cause_source ----
+
+    def test_run_end_tier1_pattern_match_source(self, guard):
+        """Tier 1: When pattern match occurs, root_cause_source='pattern_match'."""
+        trajectory = {
+            "steps": [
+                {"step_index": 0, "reasoning": "Look around.", "action_name": "look", "action_args": {}, "tool_response": "ok"},
+                {"step_index": 1, "reasoning": "mechanical sequential search one by one cabinet by cabinet", "action_name": "open", "action_args": {"target": "cabinet 1"}, "tool_response": "ok"},
+            ]
+        }
+        result = guard.on_run_end(metadata={"run_id": "test_tier1"}, trajectory=trajectory)
+        assert result["processed"] is True
+        assert result["root_cause_source"] == "pattern_match"
+        assert result["root_cause_step_index"] == 1
+        assert result["root_cause_error_type"] == "planning_error"
+
+    def test_run_end_tier2_drift_monitor_fallback(self, guard):
+        """Tier 2: No pattern match, but drift fires -> root_cause_source='drift_monitor'."""
+        trajectory = {
+            "steps": [
+                {"step_index": 0, "reasoning": "clean step 0"},
+                {"step_index": 1, "reasoning": "clean step 1"},
+                {"step_index": 2, "reasoning": "clean step 2"},
+            ]
+        }
+        step_returns = [
+            {"match_details": None, "drift_detected": False, "drift_assessment": {"drift_detected": False}, "reflection_result": None},
+            {
+                "match_details": None,
+                "drift_detected": True,
+                "drift_assessment": {
+                    "drift_detected": True,
+                    "step_index": 1,
+                    "severity_level": "high",
+                    "triggered_signals": ["REPEATED_STALLED_SUBGOALS"],
+                    "reasons": ["2 stalled subgoals"],
+                },
+                "reflection_result": None,
+            },
+            {"match_details": None, "drift_detected": False, "drift_assessment": {"drift_detected": False}, "reflection_result": None},
+        ]
+        with patch.object(guard, "on_step", side_effect=step_returns):
+            result = guard.on_run_end(metadata={"run_id": "test_tier2"}, trajectory=trajectory)
+            assert result["root_cause_source"] == "drift_monitor"
+            assert result["root_cause_step_index"] == 1
+            assert result["root_cause_error_type"] == "planning_error"
+
+    def test_run_end_tier3_reflector_fallback(self, guard):
+        """Tier 3: No pattern match, no drift, but reflector suggests revision -> root_cause_source='reflector'."""
+        trajectory = {
+            "steps": [
+                {"step_index": 0, "reasoning": "clean step 0"},
+                {"step_index": 1, "reasoning": "step 1"},
+            ]
+        }
+        step_returns = [
+            {"match_details": None, "drift_detected": False, "drift_assessment": None, "reflection_result": None},
+            {
+                "match_details": None,
+                "drift_detected": False,
+                "drift_assessment": None,
+                "reflection_result": {
+                    "revision_suggested": True,
+                    "step_index": 1,
+                    "revision_reasoning": "Plan invalidated due to unexpected goal divergence",
+                    "evidence_sources": ["subgoal_boundary"],
+                },
+            },
+        ]
+        with patch.object(guard, "on_step", side_effect=step_returns):
+            result = guard.on_run_end(metadata={"run_id": "test_tier3"}, trajectory=trajectory)
+            assert result["root_cause_source"] == "reflector"
+            assert result["root_cause_step_index"] == 1
+            assert result["root_cause_error_type"] in ("planning_error", "plan_deviation")
+
+    def test_run_end_tier4_clean_run_none(self, guard):
+        """Tier 4: Genuinely clean run -> root_cause_source='none', all root cause fields None."""
+        trajectory = {
+            "steps": [
+                {"step_index": 0, "reasoning": "Look around.", "action_name": "look", "action_args": {}, "tool_response": "Clean room."},
+            ]
+        }
+        result = guard.on_run_end(metadata={"run_id": "test_tier4_clean"}, trajectory=trajectory)
+        assert result["processed"] is True
+        assert result["root_cause_source"] == "none"
+        assert result["root_cause_step_index"] is None
+        assert result["root_cause_error_type"] is None
+
+
+class TestFlaggedConvenienceAndUnifiedMetadata:
+    """Test FIX B (unified metadata= parameter) and FIX C (flagged convenience boolean)."""
+
+    def test_on_step_flagged_field_behavior(self, guard):
+        """Verify flagged boolean is True when any subsystem flags, False when clean."""
+        step = {"step_index": 0, "reasoning": "look around", "action_name": "look", "action_args": {}, "tool_response": "ok"}
+
+        # 1. Clean step -> flagged is False
+        res = guard.on_step(step, history=[])
+        assert "flagged" in res
+        assert res["flagged"] is False
+
+        # 2. Pattern matcher match -> flagged is True
+        pattern_step = {
+            "step_index": 1,
+            "reasoning": "mechanical sequential search one by one cabinet by cabinet",
+            "action_name": "open",
+            "action_args": {},
+            "tool_response": "ok",
+        }
+        res_pattern = guard.on_step(pattern_step, history=[step])
+        assert res_pattern["flagged"] is True
+
+    def test_unified_metadata_parameter_across_all_hooks(self, guard):
+        """Verify metadata= keyword works consistently on all 4 hooks."""
+        meta = {"run_id": "test_meta_unification", "domain": "alfworld"}
+
+        # Hook 1: on_plan_proposed
+        r1 = guard.on_plan_proposed("Clean task", "1. Do step", metadata=meta)
+        assert r1["approved"] is True
+
+        # Hook 2: on_step
+        s = {"step_index": 0, "reasoning": "start", "action_name": "look", "action_args": {}}
+        r2 = guard.on_step(s, history=[], metadata=meta)
+        assert "continue_execution" in r2
+        assert "flagged" in r2
+
+        # Hook 3: on_subgoal_boundary
+        r3 = guard.on_subgoal_boundary("subgoal_001", "completed", step_history=[s], metadata=meta)
+        assert "checkpoint_passed" in r3
+
+        # Hook 4: on_run_end
+        r4 = guard.on_run_end(metadata=meta, trajectory={"steps": [s]})
+        assert r4["processed"] is True
+        assert "root_cause_source" in r4
 
 
 # =========================================================================

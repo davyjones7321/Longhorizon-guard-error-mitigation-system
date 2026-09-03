@@ -391,7 +391,15 @@ async def main_async(args: argparse.Namespace) -> None:
         
         print(f"[{idx}/{len(pending_runs)}] Judging run {run_id} ({payload.get('task_id')})...", end="", flush=True)
         prompt = f"{JUDGE_SYSTEM_PROMPT}\n\nAnalyze this agent trajectory:\n{json.dumps(payload, indent=2)}\n\nOutput JSON:"
-        res = await call_llm(prompt, args.provider, semaphore)
+        res = await call_llm(
+            prompt,
+            args.provider,
+            semaphore,
+            model=getattr(args, "model", None),
+            base_url=getattr(args, "base_url", None),
+            api_key=getattr(args, "api_key", None),
+            config_path=getattr(args, "config", None),
+        )
         
         if res:
             judged_map[run_id] = res
@@ -473,9 +481,12 @@ def main() -> None:
         "--provider",
         type=str,
         required=True,
-        choices=["cloudflare", "nvidia", "groq", "gemini", "openrouter", "tokenrouter"],
-        help="Explicit provider used for every judge call.",
+        help="Provider used for judge calls (e.g. gemini, groq, cloudflare, openai, deepseek, local_ollama, or any custom provider in providers.yaml).",
     )
+    parser.add_argument("--model", type=str, default=None, help="Custom model override (e.g. llama-3.3-70b-versatile, gemini-2.5-pro, qwen2.5:7b)")
+    parser.add_argument("--base-url", type=str, default=None, help="Custom base URL for OpenAI-compatible endpoints (e.g. http://localhost:11434/v1)")
+    parser.add_argument("--api-key", type=str, default=None, help="Explicit API key override")
+    parser.add_argument("--config", type=str, default=None, help="Path to custom providers.yaml or providers.json")
     parser.add_argument("--data-dir", default="findings/agenterrorbench_converted.json", help="Input converted dataset")
     parser.add_argument("--output", default="findings/agenterrorbench_judged.json", help="Output judgment file")
     parser.add_argument("--confident-only", action="store_true", default=True, help="Evaluate on tag_confidence == 1.0 only")

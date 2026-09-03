@@ -176,6 +176,49 @@ print(f"Root Cause Step Index: {summary['root_cause_step_index']}")
 
 ---
 
+## LLM-as-a-Judge Evaluation & Provider Configuration
+
+LongHorizon Guard includes an automated, multi-provider LLM judge (`longhorizon_guard.taxonomy.judge`) to evaluate completed trajectories and benchmark root-cause attribution.
+
+### 1. Code-Free Provider Setup (`providers.yaml` & `.env`)
+You can configure or switch providers without writing any code:
+1. Copy the secrets template to `.env` and add your API keys:
+   ```bash
+   cp .env.example .env
+   ```
+2. (Optional) Copy the provider template to `providers.yaml` to customize models, temperatures, or add local endpoints:
+   ```bash
+   cp providers.example.yaml providers.yaml
+   ```
+
+### 2. Supported Providers Out of the Box
+- **Local / Self-Hosted Models**:
+  - **Ollama**: Pre-configured (`--provider local_ollama` or `--base-url http://localhost:11434/v1`)
+  - **vLLM / LMStudio**: Pre-configured (`--provider local_vllm`)
+- **OpenAI-Compatible Cloud Gateways**:
+  - **DeepSeek**: Pre-configured (`--provider deepseek`)
+  - **OpenAI Official**: Pre-configured (`--provider openai` with `OPENAI_API_KEY`)
+- **Native Direct APIs**:
+  - **Google Gemini**, **Groq**, **Cloudflare Workers AI**, **OpenRouter**, **NVIDIA NIM**, **TokenRouter**.
+
+### 3. Running the Judge CLI
+```bash
+# Run with local Ollama (zero API keys needed):
+python -m longhorizon_guard.taxonomy.judge --provider local_ollama
+
+# Run with an OpenAI-compatible endpoint on the fly:
+python -m longhorizon_guard.taxonomy.judge \
+    --provider openai-compatible \
+    --base-url http://localhost:11434/v1 \
+    --model qwen2.5:14b
+
+# Run with Groq or Gemini using a custom model override:
+python -m longhorizon_guard.taxonomy.judge --provider groq --model llama-3.3-70b-versatile
+python -m longhorizon_guard.taxonomy.judge --provider gemini --model gemini-2.5-flash
+```
+
+---
+
 ## Known Limitations
 
 ### Semantic / Logical Constraint Checking

@@ -1,0 +1,76 @@
+# LongHorizon Guard - LLM Provider Configuration Template
+# Copy this file to `providers.yaml` (or `providers.json`) to configure or add custom models.
+# Any provider configured here can be called directly via:
+#   python -m longhorizon_guard.taxonomy.judge --provider <provider_name>
+
+providers:
+  # =========================================================================
+  # 1. Local / Self-Hosted Models (Ollama, vLLM, LMStudio, LocalAI)
+  # =========================================================================
+  local_ollama:
+    type: "openai-compatible"
+    base_url: "http://localhost:11434/v1"
+    model: "qwen2.5:7b"
+    api_key: "ollama" # optional for local endpoints
+    temperature: 0.0
+    max_tokens: 2048
+
+  local_vllm:
+    type: "openai-compatible"
+    base_url: "http://localhost:8000/v1"
+    model: "Qwen/Qwen2.5-Coder-7B-Instruct"
+    api_key_env: "VLLM_API_KEY"
+    temperature: 0.0
+    max_tokens: 2048
+
+  # =========================================================================
+  # 2. OpenAI-Compatible Cloud Endpoints (DeepSeek, OpenAI, Together, etc.)
+  # =========================================================================
+  deepseek:
+    type: "openai-compatible"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
+    api_key_env: "DEEPSEEK_API_KEY"
+    temperature: 0.0
+    max_tokens: 2048
+
+  openai:
+    type: "openai-compatible"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+    api_key_env: "OPENAI_API_KEY"
+    temperature: 0.0
+    max_tokens: 2048
+
+  # =========================================================================
+  # 3. Built-in Native Providers (Customize models without code changes)
+  # =========================================================================
+  groq:
+    type: "native"
+    model: "llama-3.3-70b-versatile"
+    api_key_env: "GROQ_API_KEY"
+
+  gemini:
+    type: "native"
+    model: "gemini-2.5-flash"
+    api_key_env: "GEMINI_API_KEY"
+
+  cloudflare:
+    type: "native"
+    model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    api_key_env: "CLOUDFLARE_API_KEY"
+
+  openrouter:
+    type: "native"
+    model: "meta-llama/llama-3.3-70b-instruct"
+    api_key_env: "OPENROUTER_API_KEY"
+
+  nvidia:
+    type: "native"
+    model: "moonshotai/kimi-k3"
+    api_key_env: "NVIDIA_API_KEY"
+
+  tokenrouter:
+    type: "native"
+    model: "z-ai/glm-5.3-free"
+    api_key_env: "TOKENROUTER_API_KEY"

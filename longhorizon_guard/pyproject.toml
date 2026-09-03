@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "longhorizon-guard"
 version = "0.1.0"
 description = "Long-horizon agent error mitigation system: taxonomy, tagger, pattern library, and drift monitor."
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 

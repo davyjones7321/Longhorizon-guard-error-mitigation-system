@@ -29,10 +29,21 @@ JUDGED_PATH = str(FINDINGS_DIR / "holdout_v2_judged.json")
 CONVERTED_PATH = str(FINDINGS_DIR / "agenterrorbench_converted.json")
 PATTERN_LIB_PATH = str(FINDINGS_DIR / "pattern_library.json")
 
+HAS_CONVERTED_DATASET = Path(CONVERTED_PATH).exists()
+skip_without_converted = pytest.mark.skipif(
+    not HAS_CONVERTED_DATASET,
+    reason="findings/agenterrorbench_converted.json absent (download THUDM/AgentErrorBench dataset to enable full smoke test suite)",
+)
+
 
 @pytest.fixture(scope="module")
 def dataset_records():
     """Load real datasets once for E2E smoke tests."""
+    if not os.path.exists(CONVERTED_PATH):
+        pytest.skip(
+            "findings/agenterrorbench_converted.json absent (download THUDM/AgentErrorBench dataset to enable full smoke test suite)"
+        )
+
     clean_runs = load_dataset(CLEAN_PATH)
     converted_runs = load_dataset(CONVERTED_PATH)
     conv_map = {r["metadata"]["run_id"]: r for r in converted_runs}
@@ -61,9 +72,11 @@ def dataset_records():
     return {"t1": t1_cand, "t2": t2_cand, "t3": t3_cand}
 
 
+@skip_without_converted
 class TestEndToEndSmokePipeline:
     """E2E verification of GuardInterface running real agent trajectories."""
 
+    @skip_without_converted
     def test_trajectory_1_clean_run_no_false_positives(self, dataset_records):
         """Trajectory 1 (Clean Run): Verify zero false positives across full pipeline."""
         run_data = dataset_records["t1"]
@@ -121,6 +134,7 @@ class TestEndToEndSmokePipeline:
         assert len(run_res["flags_summary"]) == 0
         assert run_res["root_cause_error_type"] is None
 
+    @skip_without_converted
     def test_trajectory_2_known_planning_error_signals(self, dataset_records):
         """Trajectory 2 (Known Planning Error): Verify signals surface by run end."""
         run_data = dataset_records["t2"]
@@ -165,6 +179,7 @@ class TestEndToEndSmokePipeline:
         assert total_flags > 0 or refl_suggested_count > 0, "Trajectory 2 failed to surface any error signals"
         assert root_cause in ("planning_error", "reflection_error") or refl_suggested_count > 0
 
+    @skip_without_converted
     def test_trajectory_3_long_run_triggers_and_coincidence_guard(self, dataset_records):
         """Trajectory 3 (Long Run 30 steps): Verify both reflector triggers, coincidence guard, and summary consistency."""
         run_data = dataset_records["t3"]

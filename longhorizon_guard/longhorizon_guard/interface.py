@@ -934,8 +934,8 @@ class GuardInterface:
             run_id = run_metadata.get("run_id", "unknown")
             steps = trajectory.get("steps", [])
 
-            # Scan all steps and collect flags
-            highest_confidence = 0.0
+            # Scan all steps in order and collect flags
+            # Root-cause rule (per MASTER doc): earliest tagged step, not highest-confidence
             best_match: Optional[MatchResult] = None
             best_step_idx: Optional[int] = None
             all_flags: List[Dict[str, Any]] = []
@@ -946,8 +946,8 @@ class GuardInterface:
                 if step_result.get("match_details"):
                     details = step_result["match_details"]
                     all_flags.append(details)
-                    if details["confidence"] > highest_confidence:
-                        highest_confidence = details["confidence"]
+                    # Earliest-step selection: take the FIRST step that produced a match
+                    if best_match is None:
                         best_step_idx = details["step_index"]
                         best_match = MatchResult(
                             matched=True,

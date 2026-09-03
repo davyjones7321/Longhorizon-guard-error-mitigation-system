@@ -383,8 +383,8 @@ class TestNothingHappensLoop:
 class TestOnRunEnd:
     """Test full trajectory scan via on_run_end."""
 
-    def test_run_end_finds_highest_confidence_flag(self, guard):
-        """on_run_end should scan all steps and report the highest-confidence match."""
+    def test_run_end_finds_earliest_flagged_step(self, guard):
+        """on_run_end should scan all steps and report the earliest flagged step as root cause."""
         trajectory = {
             "steps": [
                 {
@@ -425,8 +425,30 @@ class TestOnRunEnd:
         assert result["processed"] is True
         # Should have detected something in the repeated 'Nothing happens' steps
         assert len(result["flags_summary"]) > 0
+        earliest_step_index = result["flags_summary"][0]["step_index"]
+        assert result["root_cause_step_index"] == earliest_step_index
         if result["root_cause_error_type"]:
             assert result["root_cause_error_type"] in DEFAULT_TAGS
+
+    def test_run_end_selects_earliest_over_higher_confidence_step(self, guard):
+        """Verify on_run_end selects the earliest flagged step even if a later step has higher confidence."""
+        trajectory = {
+            "steps": [
+                {"step_index": 0, "reasoning": "step 0"},
+                {"step_index": 1, "reasoning": "step 1"},
+                {"step_index": 2, "reasoning": "step 2"},
+            ]
+        }
+        step_returns = [
+            {"match_details": None},
+            {"match_details": {"step_index": 1, "category": "planning_error", "confidence": 0.35, "layer": "cluster"}},
+            {"match_details": {"step_index": 2, "category": "tool_use_error", "confidence": 0.95, "layer": "structural"}},
+        ]
+        with patch.object(guard, "on_step", side_effect=step_returns):
+            result = guard.on_run_end(run_metadata={"run_id": "test_earliest"}, trajectory=trajectory)
+            assert result["root_cause_step_index"] == 1
+            assert result["root_cause_error_type"] == "planning_error"
+            assert len(result["flags_summary"]) == 2
 
 
 # =========================================================================

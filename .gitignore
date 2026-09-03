@@ -64,6 +64,7 @@ findings/*
 !findings/pattern_library.json
 !findings/idf_table.json
 !findings/holdout_v2_judged.json
+!findings/all_clean_outputs.json
 
 # =========================================================================
 # Scratch, Output & One-Off Data Dumps

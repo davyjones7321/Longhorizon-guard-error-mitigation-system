@@ -90,3 +90,6 @@ test_tokenrouter_key.py
 .agents/
 .gemini/
 .DS_Store
+
+# Internal references / master notes
+Long-Horizon-Error-Mitigation-MASTER.md

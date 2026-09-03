@@ -356,10 +356,11 @@ class PatternMatcher:
 
     def __init__(
         self,
-        pattern_library_path: str = "findings/pattern_library.json",
+        pattern_library_path: Optional[str] = "findings/pattern_library.json",
         category_thresholds: Optional[Dict[str, float]] = None,
         match_timeout: float = DEFAULT_MATCH_TIMEOUT_SECONDS,
     ) -> None:
+        pattern_library_path = pattern_library_path or "findings/pattern_library.json"
         self._match_timeout = match_timeout
         self._category_thresholds = category_thresholds or dict(DEFAULT_CATEGORY_THRESHOLDS)
         self._keyword_rules = _build_keyword_rules()
@@ -391,8 +392,11 @@ class PatternMatcher:
 
         # Resolve path to absolute location
         path_obj = Path(path)
+        bundled_data_dir = Path(__file__).resolve().parents[0] / "data"
         candidates = [
             path_obj,
+            bundled_data_dir / path_obj.name,
+            bundled_data_dir / "pattern_library.json",
             Path(__file__).resolve().parents[1] / "findings" / path_obj.name,
             Path(__file__).resolve().parents[1] / path_obj,
             Path.cwd() / "findings" / path_obj.name,
@@ -414,14 +418,20 @@ class PatternMatcher:
             except Exception as e:
                 logger.warning("Failed reading idf from %s: %s", path_obj, e)
 
-        if not precomputed_idf and path_obj.parent.exists():
-            sibling_idf_path = path_obj.parent / "idf_table.json"
-            if sibling_idf_path.exists():
-                try:
-                    with open(sibling_idf_path, "r", encoding="utf-8") as f:
-                        precomputed_idf = json.load(f)
-                except Exception as e:
-                    logger.warning("Failed reading sibling idf_table.json: %s", e)
+        if not precomputed_idf:
+            idf_candidates = [
+                path_obj.parent / "idf_table.json",
+                bundled_data_dir / "idf_table.json",
+                Path(__file__).resolve().parents[1] / "findings" / "idf_table.json",
+            ]
+            for sibling_idf_path in idf_candidates:
+                if sibling_idf_path.exists():
+                    try:
+                        with open(sibling_idf_path, "r", encoding="utf-8") as f:
+                            precomputed_idf = json.load(f)
+                            break
+                    except Exception as e:
+                        logger.warning("Failed reading sibling idf_table.json from %s: %s", sibling_idf_path, e)
 
         # Collect all trigger descriptions tokens
         all_docs_tokens: List[List[str]] = [
@@ -646,6 +656,105 @@ def _detect_nothing_happens_loop(
 
 
 # =========================================================================
+# Plan constraint and contradiction heuristics (Rule 4 / Approaches 1 & 2)
+# =========================================================================
+
+CONTRADICTORY_TERM_PAIRS = (
+    ("men", (r"\bmen(?:'s)?\b", r"\bmens\b"), "women", (r"\bwomen(?:'s)?\b", r"\bwomens\b")),
+    ("male", (r"\bmale\b",), "female", (r"\bfemale\b",)),
+    ("boys", (r"\bboys?\b",), "girls", (r"\bgirls?\b",)),
+    ("cheap", (r"\bcheapest\b", r"\bcheap\b"), "expensive", (r"\bexpensive\b", r"\bcostly\b")),
+    ("non-stop", (r"\bnon-?stop\b", r"\bdirect\b"), "layover", (r"\blayover\b", r"\bconnecting\b")),
+)
+
+EXPLICIT_REQUIRED_TERMS = (
+    ("men", (r"\bmen(?:'s)?\b", r"\bmens\b")),
+    ("women", (r"\bwomen(?:'s)?\b", r"\bwomens\b")),
+    ("male", (r"\bmale\b",)),
+    ("female", (r"\bfemale\b",)),
+    ("boys", (r"\bboys?\b",)),
+    ("girls", (r"\bgirls?\b",)),
+)
+
+
+def _detect_plan_contradiction(
+    task_description: str,
+    proposed_plan: str,
+) -> Optional[MatchResult]:
+    """Detect if proposed plan directly contradicts explicit task requirements (Approach 2)."""
+    if not task_description or not proposed_plan:
+        return None
+
+    task_lower = task_description.lower()
+    plan_lower = proposed_plan.lower()
+
+    for left_name, left_patterns, right_name, right_patterns in CONTRADICTORY_TERM_PAIRS:
+        task_has_left = any(re.search(p, task_lower) for p in left_patterns)
+        task_has_right = any(re.search(p, task_lower) for p in right_patterns)
+        plan_has_left = any(re.search(p, plan_lower) for p in left_patterns)
+        plan_has_right = any(re.search(p, plan_lower) for p in right_patterns)
+
+        if task_has_left and not task_has_right and plan_has_right and not plan_has_left:
+            return MatchResult(
+                matched=True,
+                category="planning_error",
+                confidence=0.92,
+                layer="keyword",
+                rule_id="planning_contradiction",
+                description=f"Task explicitly requires '{left_name}', but proposed plan targets '{right_name}'",
+                safe_alternative=f"Revise plan to target '{left_name}' as specified in task requirements",
+            )
+
+        if task_has_right and not task_has_left and plan_has_left and not plan_has_right:
+            return MatchResult(
+                matched=True,
+                category="planning_error",
+                confidence=0.92,
+                layer="keyword",
+                rule_id="planning_contradiction",
+                description=f"Task explicitly requires '{right_name}', but proposed plan targets '{left_name}'",
+                safe_alternative=f"Revise plan to target '{right_name}' as specified in task requirements",
+            )
+
+    return None
+
+
+def _detect_plan_constraint_omission(
+    task_description: str,
+    proposed_plan: str,
+) -> Optional[MatchResult]:
+    """Detect if proposed plan omits explicit task constraints in its search/action strategy (Approach 1)."""
+    if not task_description or not proposed_plan:
+        return None
+
+    task_lower = task_description.lower()
+    plan_lower = proposed_plan.lower()
+
+    has_action_intent = bool(
+        re.search(r"\b(?:search|query|find|buy|purchase|filter|select|order|navigate)\b", plan_lower)
+    )
+    if not has_action_intent:
+        return None
+
+    for term_name, term_patterns in EXPLICIT_REQUIRED_TERMS:
+        task_has_term = any(re.search(p, task_lower) for p in term_patterns)
+        if task_has_term:
+            plan_has_term = any(re.search(p, plan_lower) for p in term_patterns)
+            if not plan_has_term:
+                return MatchResult(
+                    matched=True,
+                    category="planning_error",
+                    confidence=0.85,
+                    layer="keyword",
+                    rule_id="planning_constraint_omission",
+                    description=f"Task explicitly requires '{term_name}', but proposed plan omits it from planned search/actions",
+                    safe_alternative=f"Include '{term_name}' in search parameters and filtering steps",
+                )
+
+    return None
+
+
+# =========================================================================
 # Production GuardInterface
 # =========================================================================
 
@@ -657,10 +766,11 @@ class GuardInterface:
 
     def __init__(
         self,
-        pattern_library_path: str = "findings/pattern_library.json",
+        pattern_library_path: Optional[str] = "findings/pattern_library.json",
         category_thresholds: Optional[Dict[str, float]] = None,
         match_timeout: float = DEFAULT_MATCH_TIMEOUT_SECONDS,
     ) -> None:
+        pattern_library_path = pattern_library_path or "findings/pattern_library.json"
         try:
             self._matcher = PatternMatcher(
                 pattern_library_path=pattern_library_path,
@@ -720,25 +830,47 @@ class GuardInterface:
             if self._drift_monitor is not None:
                 self._drift_monitor.reset()
 
-            if self._matcher is None:
-                return result
-
             run_id = (metadata or {}).get("run_id", "unknown")
-            combined_text = f"{task_description} {proposed_plan}"
 
-            match = self._matcher.match(combined_text, run_id=run_id, step_index=-1)
-
-            if match.matched and match.category == "planning_error":
+            # 1. Structural plan contradiction (Approach 2)
+            contradiction_match = _detect_plan_contradiction(task_description, proposed_plan)
+            if contradiction_match and contradiction_match.matched:
                 result["flags"].append(
-                    f"[{match.layer}] planning_error detected (confidence={match.confidence:.2f}): "
-                    f"{match.description}"
+                    f"[{contradiction_match.layer}:{contradiction_match.rule_id}] "
+                    f"planning_error detected (confidence={contradiction_match.confidence:.2f}): "
+                    f"{contradiction_match.description}"
                 )
-                if match.safe_alternative:
-                    result["suggestions"].append(match.safe_alternative)
+                if contradiction_match.safe_alternative:
+                    result["suggestions"].append(contradiction_match.safe_alternative)
 
+            # 2. Structural constraint omission (Approach 1)
+            omission_match = _detect_plan_constraint_omission(task_description, proposed_plan)
+            if omission_match and omission_match.matched:
+                result["flags"].append(
+                    f"[{omission_match.layer}:{omission_match.rule_id}] "
+                    f"planning_error detected (confidence={omission_match.confidence:.2f}): "
+                    f"{omission_match.description}"
+                )
+                if omission_match.safe_alternative:
+                    result["suggestions"].append(omission_match.safe_alternative)
+
+            # 3. Layer A + B via PatternMatcher
+            if self._matcher is not None:
+                combined_text = f"{task_description} {proposed_plan}"
+                match = self._matcher.match(combined_text, run_id=run_id, step_index=-1)
+
+                if match.matched and match.category == "planning_error":
+                    result["flags"].append(
+                        f"[{match.layer}] planning_error detected (confidence={match.confidence:.2f}): "
+                        f"{match.description}"
+                    )
+                    if match.safe_alternative:
+                        result["suggestions"].append(match.safe_alternative)
+
+            if result["flags"]:
                 logger.info(
-                    "on_plan_proposed flag run_id=%s category=%s confidence=%.3f layer=%s",
-                    run_id, match.category, match.confidence, match.layer,
+                    "on_plan_proposed flags run_id=%s count=%d",
+                    run_id, len(result["flags"]),
                 )
 
         except Exception:
@@ -797,14 +929,29 @@ class GuardInterface:
 
                 combined_text = f"{reasoning} {action_name} {action_args}"
 
-                # --- Layer A + B via PatternMatcher ---
-                match = self._matcher.match(combined_text, run_id=run_id, step_index=step_idx)
+                match: Optional[MatchResult] = None
+
+                # Check explicit contradiction first if metadata provides task description
+                if metadata:
+                    task_desc = metadata.get("task_description") or metadata.get("description") or ""
+                    if task_desc and "search" in action_name.lower():
+                        contra = _detect_plan_contradiction(task_desc, f"{action_name} {action_args}")
+                        if contra and contra.matched:
+                            match = contra
+
+                # --- Layer A + B via PatternMatcher if not already matched ---
+                if match is None or not match.matched:
+                    match = self._matcher.match(combined_text, run_id=run_id, step_index=step_idx)
 
                 # --- Structural heuristics (always run) ---
                 if not match.matched:
                     structural = _detect_action_repetition(step_record, history)
                     if structural is None:
                         structural = _detect_nothing_happens_loop(step_record, history)
+                    if structural is None and metadata:
+                        task_desc = metadata.get("task_description") or metadata.get("description") or ""
+                        if task_desc and "search" in action_name.lower():
+                            structural = _detect_plan_constraint_omission(task_desc, f"{action_name} {action_args}")
                     if structural and structural.matched:
                         match = structural
                         logger.info(

@@ -22,3 +22,10 @@ longhorizon-guard = "longhorizon_guard.cli:main"
 where = ["."]
 include = ["longhorizon_guard*"]
 
+[tool.setuptools.package-data]
+"longhorizon_guard" = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["scratch", "eval", "harness", "build", "dist", ".git"]
+

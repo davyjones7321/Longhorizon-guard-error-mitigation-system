@@ -14,20 +14,24 @@ from typing import List, Union
 
 from longhorizon_guard.pattern_library.schema import PatternEntry
 
-# Default storage location (sibling to findings/)
+BUNDLED_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DEFAULT_PATTERN_FILE = "findings/pattern_library.json"
 
 
 def load_patterns(
-    path: Union[str, Path] = DEFAULT_PATTERN_FILE,
+    path: Union[str, Path, None] = DEFAULT_PATTERN_FILE,
 ) -> List[PatternEntry]:
     """Load pattern entries from a JSON file.
 
     Returns an empty list if the file doesn't exist yet.
     """
+    if path is None:
+        path = DEFAULT_PATTERN_FILE
     p = Path(path)
     if not p.exists() or (p.parent.name == "findings" and "longhorizon_guard" in str(p)):
         candidates = [
+            BUNDLED_DATA_DIR / p.name,
+            BUNDLED_DATA_DIR / "pattern_library.json",
             Path(__file__).resolve().parents[2] / "findings" / p.name,
             Path(__file__).resolve().parents[2] / p,
             Path.cwd() / "findings" / p.name,

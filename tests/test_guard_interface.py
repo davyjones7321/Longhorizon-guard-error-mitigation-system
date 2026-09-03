@@ -299,6 +299,58 @@ class TestOnPlanProposed:
         assert isinstance(result["flags"], list)
         assert isinstance(result["suggestions"], list)
 
+    def test_contradictory_plan_flagged(self, guard):
+        """A plan that directly contradicts task constraints should flag a contradiction."""
+        result = guard.on_plan_proposed(
+            task_description="Find men's dress shirts",
+            proposed_plan="1. Search for women's dress shirts. 2. Select first result.",
+            metadata={"run_id": "test_plan_contradict"},
+        )
+        assert result["approved"] is True
+        assert any("planning_contradiction" in f for f in result["flags"])
+        assert any("women" in f and "men" in f for f in result["flags"])
+        assert len(result["suggestions"]) > 0
+
+    def test_omitted_constraint_plan_flagged(self, guard):
+        """A plan that omits explicit task constraints from search strategy should flag an omission."""
+        result = guard.on_plan_proposed(
+            task_description="Find men's dress shirts under $50",
+            proposed_plan="1. Search for dress shirts. 2. Select first result.",
+            metadata={"run_id": "test_plan_omit"},
+        )
+        assert result["approved"] is True
+        assert any("planning_constraint_omission" in f for f in result["flags"])
+        assert len(result["suggestions"]) > 0
+
+    def test_clean_constrained_plan_passes(self, guard):
+        """A plan that properly includes required task constraints should pass cleanly."""
+        result = guard.on_plan_proposed(
+            task_description="Find blue cotton socks under $20",
+            proposed_plan="1. Search for blue cotton socks under $20. 2. Select first result.",
+            metadata={"run_id": "test_plan_clean_constrained"},
+        )
+        assert result["approved"] is True
+        assert result["flags"] == []
+
+    def test_search_step_contradiction_flagged(self, guard):
+        """A search action step that contradicts task description should be flagged in on_step."""
+        step = {
+            "step_index": 0,
+            "action_name": "search",
+            "action_args": {"query": "women's dress shirts"},
+            "reasoning": "Searching for the item",
+        }
+        meta = {"task_description": "Find men's dress shirts"}
+        res = guard.on_step(step, history=[], metadata=meta)
+        assert res["drift_detected"] is True
+        assert "planning_contradiction" in str(res.get("warning"))
+
+    def test_guard_interface_none_path_safe(self):
+        """GuardInterface(pattern_library_path=None) must safely default without raising TypeError."""
+        from longhorizon_guard import GuardInterface
+        g = GuardInterface(pattern_library_path=None)
+        assert g is not None
+
 
 # =========================================================================
 # Test (f): Structural heuristic — repeated action

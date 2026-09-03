@@ -13,7 +13,7 @@ from longhorizon_guard.storage.reader import (
     validate_metadata,
 )
 
-REPO_ROOT = Path(__file__).parent.parent.resolve() if (Path(__file__).parent.parent / "findings").exists() else Path(__file__).parent.parent.parent.resolve()
+REPO_ROOT = Path(__file__).resolve().parents[1]
 CLEAN_OUTPUTS_PATH = REPO_ROOT / "findings" / "all_clean_outputs.json"
 
 

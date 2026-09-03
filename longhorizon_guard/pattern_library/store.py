@@ -30,11 +30,8 @@ def load_patterns(
         candidates = [
             Path(__file__).resolve().parents[2] / "findings" / p.name,
             Path(__file__).resolve().parents[2] / p,
-            Path(__file__).resolve().parents[1] / "findings" / p.name,
-            Path(__file__).resolve().parents[3] / "findings" / p.name,
             Path.cwd() / "findings" / p.name,
             Path.cwd() / p,
-            Path.cwd().parent / p,
         ]
         for cand in candidates:
             if cand.exists():

@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-REPO_ROOT = Path(__file__).parent.parent.resolve()
+REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from longhorizon_guard.interface import GuardInterface
@@ -31,7 +31,7 @@ from longhorizon_guard.drift_monitor.monitor import (
 )
 from longhorizon_guard.subgoals.schema import SubgoalStatus
 
-PATTERN_LIB_PATH = str(REPO_ROOT / "findings" / "pattern_library.json") if (REPO_ROOT / "findings" / "pattern_library.json").exists() else str(REPO_ROOT.parent / "findings" / "pattern_library.json")
+PATTERN_LIB_PATH = str(REPO_ROOT / "findings" / "pattern_library.json")
 
 
 # =========================================================================

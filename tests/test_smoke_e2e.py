@@ -17,13 +17,13 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).parent.parent.resolve()
+REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from longhorizon_guard.interface import GuardInterface
 from longhorizon_guard.storage.reader import load_dataset
 
-FINDINGS_DIR = REPO_ROOT / "findings" if (REPO_ROOT / "findings").exists() else REPO_ROOT.parent / "findings"
+FINDINGS_DIR = REPO_ROOT / "findings"
 CLEAN_PATH = str(FINDINGS_DIR / "all_clean_outputs.json")
 JUDGED_PATH = str(FINDINGS_DIR / "holdout_v2_judged.json")
 CONVERTED_PATH = str(FINDINGS_DIR / "agenterrorbench_converted.json")

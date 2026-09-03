@@ -28,10 +28,13 @@ def load_patterns(
     p = Path(path)
     if not p.exists() or (p.parent.name == "findings" and "longhorizon_guard" in str(p)):
         candidates = [
+            Path(__file__).resolve().parents[2] / "findings" / p.name,
+            Path(__file__).resolve().parents[2] / p,
+            Path(__file__).resolve().parents[1] / "findings" / p.name,
             Path(__file__).resolve().parents[3] / "findings" / p.name,
-            Path(__file__).resolve().parents[3] / p,
-            Path.cwd().parent / p,
+            Path.cwd() / "findings" / p.name,
             Path.cwd() / p,
+            Path.cwd().parent / p,
         ]
         for cand in candidates:
             if cand.exists():

@@ -31,7 +31,7 @@ from longhorizon_guard.drift_monitor.monitor import (
 )
 from longhorizon_guard.subgoals.schema import SubgoalStatus
 
-PATTERN_LIB_PATH = str(REPO_ROOT.parent / "findings" / "pattern_library.json")
+PATTERN_LIB_PATH = str(REPO_ROOT / "findings" / "pattern_library.json") if (REPO_ROOT / "findings" / "pattern_library.json").exists() else str(REPO_ROOT.parent / "findings" / "pattern_library.json")
 
 
 # =========================================================================

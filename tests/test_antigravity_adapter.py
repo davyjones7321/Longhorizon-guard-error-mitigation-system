@@ -9,9 +9,9 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
 from longhorizon_guard.storage.reader import load_dataset, validate_metadata
-ANTIGRAVITY_SESSIONS_PATH = str(REPO_ROOT.parent / "findings" / "antigravity_sessions.json")
+ANTIGRAVITY_SESSIONS_PATH = str(REPO_ROOT / "findings" / "antigravity_sessions.json")
 if not os.path.exists(ANTIGRAVITY_SESSIONS_PATH):
-    ANTIGRAVITY_SESSIONS_PATH = str(REPO_ROOT / "findings" / "antigravity_sessions.json")
+    ANTIGRAVITY_SESSIONS_PATH = str(REPO_ROOT.parent / "findings" / "antigravity_sessions.json")
 
 
 def test_antigravity_adapter_schema_compliance():

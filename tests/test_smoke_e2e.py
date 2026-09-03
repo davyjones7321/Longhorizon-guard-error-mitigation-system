@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from longhorizon_guard.interface import GuardInterface
 from longhorizon_guard.storage.reader import load_dataset
 
-FINDINGS_DIR = REPO_ROOT.parent / "findings" if (REPO_ROOT.parent / "findings").exists() else REPO_ROOT / "findings"
+FINDINGS_DIR = REPO_ROOT / "findings" if (REPO_ROOT / "findings").exists() else REPO_ROOT.parent / "findings"
 CLEAN_PATH = str(FINDINGS_DIR / "all_clean_outputs.json")
 JUDGED_PATH = str(FINDINGS_DIR / "holdout_v2_judged.json")
 CONVERTED_PATH = str(FINDINGS_DIR / "agenterrorbench_converted.json")

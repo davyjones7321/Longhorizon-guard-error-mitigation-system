@@ -31,7 +31,7 @@ from longhorizon_guard.reflector.reflector import (
     DEFAULT_STEP_INTERVAL,
 )
 
-PATTERN_LIB_PATH = str(REPO_ROOT.parent / "findings" / "pattern_library.json")
+PATTERN_LIB_PATH = str(REPO_ROOT / "findings" / "pattern_library.json") if (REPO_ROOT / "findings" / "pattern_library.json").exists() else str(REPO_ROOT.parent / "findings" / "pattern_library.json")
 
 
 # =========================================================================

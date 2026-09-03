@@ -392,10 +392,12 @@ class PatternMatcher:
         # Resolve path to absolute location
         path_obj = Path(path)
         candidates = [
+            Path(__file__).resolve().parents[1] / "findings" / path_obj.name,
+            Path(__file__).resolve().parents[1] / path_obj,
             Path(__file__).resolve().parents[2] / "findings" / path_obj.name,
-            Path(__file__).resolve().parents[2] / path_obj,
-            Path.cwd().parent / path_obj,
+            Path.cwd() / "findings" / path_obj.name,
             Path.cwd() / path_obj,
+            Path.cwd().parent / path_obj,
         ]
         for cand in candidates:
             if cand.exists():

@@ -43,7 +43,7 @@ from longhorizon_guard.interface import (
 )
 
 # Path to real pattern library (produced by mine_patterns)
-PATTERN_LIB_PATH = str(REPO_ROOT.parent / "findings" / "pattern_library.json")
+PATTERN_LIB_PATH = str(REPO_ROOT / "findings" / "pattern_library.json") if (REPO_ROOT / "findings" / "pattern_library.json").exists() else str(REPO_ROOT.parent / "findings" / "pattern_library.json")
 
 
 # =========================================================================

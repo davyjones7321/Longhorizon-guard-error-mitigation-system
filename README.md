@@ -80,14 +80,20 @@ The package implements a modular, non-blocking 4-hook interface (`GuardInterface
 ### Prerequisites
 - Python 3.9 or higher
 
-### Cloning the Repository
+### Direct One-Line Installation (Pip from GitHub)
+Install directly from GitHub with zero subdirectory syntax required:
 ```bash
-git clone https://github.com/your-org/error-prop.git
-cd error-prop/longhorizon_guard
+pip install git+https://github.com/davyjones7321/Longhorizon-guard-error-mitigation-system.git
 ```
 
-### Installing the Package
-Install in editable mode for local development:
+### Local Installation
+```bash
+git clone https://github.com/davyjones7321/Longhorizon-guard-error-mitigation-system.git
+cd Longhorizon-guard-error-mitigation-system
+pip install .
+```
+
+For active development, install in editable mode:
 ```bash
 pip install -e .
 ```

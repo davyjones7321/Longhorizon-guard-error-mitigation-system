@@ -313,8 +313,11 @@ class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
         """Forward HTTP request to the target upstream LLM provider."""
         upstream_base = self.upstream_base_url.rstrip("/")
         path = self.path
-        if upstream_base.endswith("/v1") and path.startswith("/v1/"):
-            target_url = upstream_base + path[3:]
+        subpath = path[3:] if path.startswith("/v1/") else path
+        if upstream_base.endswith("/v1"):
+            target_url = upstream_base + subpath
+        elif "/openai" in upstream_base:
+            target_url = upstream_base.rstrip("/") + subpath
         else:
             target_url = upstream_base + path
 

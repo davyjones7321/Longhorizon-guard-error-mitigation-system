@@ -237,6 +237,63 @@ class TestSlowProgressRatio:
 
 
 # =========================================================================
+# Test (c2): Configurable drift threshold & signal weight interactions
+# =========================================================================
+
+class TestDriftThresholdConfiguration:
+    """Test that drift_threshold governs drift detection correctly."""
+
+    def test_single_pattern_repetition_below_default_threshold(self):
+        """Pattern repetition has weight 0.30, which is < 0.35 default threshold.
+        It triggers the signal but drift_detected should be False unless threshold is lowered."""
+        monitor = DriftMonitor(drift_threshold=0.35)
+        subgoal_state = {
+            "current_subgoal_id": "subgoal_001",
+            "current_subgoal_description": "Initial search",
+            "status": "in_progress",
+            "steps_in_current_subgoal": 2,
+            "stalled_advanced_subgoals_count": 0,
+            "completed_subgoals_count": 0,
+            "failed_subgoals_count": 0,
+            "total_subgoals_count": 3,
+            "subgoal_progress_ratio": 0.0,
+        }
+        match_details = {"layer": "pattern_match", "match_found": True, "top_similarity": 0.85}
+        # First trigger
+        monitor.evaluate_step(subgoal_state, {"step_index": 0}, [], match_details=match_details)
+        # Second trigger reaches threshold count of 2
+        assessment = monitor.evaluate_step(
+            subgoal_state, {"step_index": 1}, [{"step_index": 0}], match_details=match_details
+        )
+        assert SIGNAL_PATTERN_REPETITION in assessment.triggered_signals
+        assert assessment.severity_score == 0.30
+        assert assessment.drift_detected is False  # 0.30 < 0.35 default
+
+    def test_lowered_drift_threshold_triggers_on_pattern_repetition(self):
+        """With drift_threshold=0.30, pattern repetition (weight 0.30) triggers drift_detected=True."""
+        monitor = DriftMonitor(drift_threshold=0.30)
+        subgoal_state = {
+            "current_subgoal_id": "subgoal_001",
+            "current_subgoal_description": "Initial search",
+            "status": "in_progress",
+            "steps_in_current_subgoal": 2,
+            "stalled_advanced_subgoals_count": 0,
+            "completed_subgoals_count": 0,
+            "failed_subgoals_count": 0,
+            "total_subgoals_count": 3,
+            "subgoal_progress_ratio": 0.0,
+        }
+        match_details = {"layer": "pattern_match", "match_found": True, "top_similarity": 0.85}
+        monitor.evaluate_step(subgoal_state, {"step_index": 0}, [], match_details=match_details)
+        assessment = monitor.evaluate_step(
+            subgoal_state, {"step_index": 1}, [{"step_index": 0}], match_details=match_details
+        )
+        assert SIGNAL_PATTERN_REPETITION in assessment.triggered_signals
+        assert assessment.severity_score == 0.30
+        assert assessment.drift_detected is True
+
+
+# =========================================================================
 # Test (d): Exception / Malformed input fail-open
 # =========================================================================
 

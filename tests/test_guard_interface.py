@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from longhorizon_guard.taxonomy.categories import DEFAULT_TAGS
+from longhorizon_guard.config import GuardConfig
 from longhorizon_guard.interface import (
     GuardInterface,
     PatternMatcher,
@@ -750,4 +751,100 @@ class TestBoilerplateRegression:
         match_details = result.get("match_details")
         if match_details:
             assert match_details.get("layer") != "cluster", f"Boilerplate in tool_response triggered Layer A cluster match: {match_details}"
+
+
+class TestOnRunEndLiveVsOfflineParity:
+    """Regression tests verifying live-monitoring vs standalone offline on_run_end parity (F-01)."""
+
+    def test_live_vs_offline_identical_analysis(self):
+        """Pattern A (live on_step + on_run_end) and Pattern B (standalone on_run_end) must produce identical analysis."""
+        from longhorizon_guard import GuardInterface
+
+        task = "Find blue sneakers and buy"
+        plan = "1. Search for blue sneakers\n2. Select size\n3. Purchase"
+
+        steps = [
+            {"step_index": 0, "reasoning": "searching", "action_name": "search", "action_args": {"query": "blue sneakers"}, "tool_response": "found 5"},
+            {"step_index": 1, "reasoning": "selecting", "action_name": "click", "action_args": {"button": "size 10"}, "tool_response": "selected"},
+            {"step_index": 2, "reasoning": "buying", "action_name": "click", "action_args": {"button": "buy"}, "tool_response": "purchased"},
+        ]
+
+        # Pattern A: Live monitoring
+        g_live = GuardInterface()
+        g_live.on_plan_proposed(task, plan)
+        for s in steps:
+            g_live.on_step(s, [])
+        res_live = g_live.on_run_end(metadata={"task": task}, trajectory={"steps": steps})
+
+        # Pattern B: Standalone offline post-hoc
+        g_offline = GuardInterface()
+        g_offline.on_plan_proposed(task, plan)
+        res_offline = g_offline.on_run_end(metadata={"task": task}, trajectory={"steps": steps})
+
+        # Verify parity
+        assert res_live["root_cause_error_type"] == res_offline["root_cause_error_type"]
+        assert res_live["root_cause_step_index"] == res_offline["root_cause_step_index"]
+        assert res_live["root_cause_source"] == res_offline["root_cause_source"]
+        assert len(res_live["flags_summary"]) == len(res_offline["flags_summary"])
+
+        # Subgoals parity: statuses and step_indices must match exactly
+        live_sgs = res_live["subgoals_summary"]["subgoals"]
+        offline_sgs = res_offline["subgoals_summary"]["subgoals"]
+        assert len(live_sgs) == len(offline_sgs)
+        for i in range(len(live_sgs)):
+            assert live_sgs[i]["subgoal_id"] == offline_sgs[i]["subgoal_id"]
+            assert live_sgs[i]["status"] == offline_sgs[i]["status"]
+            assert live_sgs[i]["step_indices"] == offline_sgs[i]["step_indices"]
+
+        # Drift parity
+        assert (
+            res_live["drift_summary"]["final_drift_assessment"]["drift_detected"]
+            == res_offline["drift_summary"]["final_drift_assessment"]["drift_detected"]
+        )
+
+
+class TestOnPlanProposedFlaggedField:
+    """Verify on_plan_proposed approved vs flagged contract (ISSUE-PLAN-01)."""
+
+    def test_plan_approved_always_true_and_flagged_reflects_detection(self, guard):
+        """approved remains True (non-blocking contract), flagged reflects whether flags were detected."""
+        # Bad plan: contradiction and omission
+        bad_res = guard.on_plan_proposed(
+            task_description="Search for mens running shoes",
+            proposed_plan="1. Search for womens running shoes",
+        )
+        assert bad_res["approved"] is True
+        assert bad_res["flagged"] is True
+        assert len(bad_res["flags"]) > 0
+
+        # Good plan: clean matching plan
+        good_res = guard.on_plan_proposed(
+            task_description="Search for cotton socks",
+            proposed_plan="1. Search for cotton socks",
+        )
+        assert good_res["approved"] is True
+        assert good_res["flagged"] is False
+        assert len(good_res["flags"]) == 0
+
+
+class TestGuardConfigIntegration:
+    """Verify GuardConfig integration with GuardInterface (FIX F-13)."""
+
+    def test_guard_interface_initialization_with_config(self):
+        config = GuardConfig(
+            max_subgoal_steps=7,
+            drift_threshold=0.25,
+            fail_open=True,
+        )
+        guard = GuardInterface(config=config)
+        assert guard._subgoal_tracker.max_subgoal_steps == 7
+        assert guard._drift_monitor.drift_threshold == 0.25
+        assert guard.fail_open is True
+
+    def test_guard_interface_direct_params_override_defaults(self):
+        guard = GuardInterface(max_subgoal_steps=5, drift_threshold=0.40)
+        assert guard._subgoal_tracker.max_subgoal_steps == 5
+        assert guard._drift_monitor.drift_threshold == 0.40
+
+
 

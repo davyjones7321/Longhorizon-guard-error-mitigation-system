@@ -120,11 +120,50 @@ _SUCCESS_KEYWORDS = {
     "found", "success", "task complete", "you see", "unlocked",
 }
 
-# RULE 2: Failure Keywords in Tool Response
-_FAILURE_KEYWORDS = {
-    "cannot find", "nothing happens", "invalid action", "error",
-    "failed", "cannot open", "cannot take", "syntax error",
-}
+# RULE 2: Failure Keywords & Patterns in Tool Response (F-07)
+# Negative patterns for benign phrasings where "error" is explicitly absent or zero:
+_BENIGN_ERROR_PATTERNS = [
+    re.compile(r"\b0\s+errors?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+errors?\b", re.IGNORECASE),
+    re.compile(r"\berrors?\s*:\s*(?:0|none|null)\b", re.IGNORECASE),
+    re.compile(r"\bwithout\s+errors?\b", re.IGNORECASE),
+]
+
+_MULTI_WORD_FAILURE_PATTERNS = [
+    re.compile(r"\bcannot\s+find\b", re.IGNORECASE),
+    re.compile(r"\bnothing\s+happens\b", re.IGNORECASE),
+    re.compile(r"\binvalid\s+action\b", re.IGNORECASE),
+    re.compile(r"\bcannot\s+open\b", re.IGNORECASE),
+    re.compile(r"\bcannot\s+take\b", re.IGNORECASE),
+    re.compile(r"\bsyntax\s+error\b", re.IGNORECASE),
+]
+
+_SINGLE_WORD_FAILURE_PATTERN = re.compile(r"\b(?:error|errors|failed|failure)\b", re.IGNORECASE)
+
+
+def _detect_tool_failure(tool_resp: str) -> Optional[str]:
+    """Detect real failure indicators in tool response with word-boundary matching,
+    excluding common benign phrasings (e.g. '0 errors', 'no error', 'error: none')."""
+    if not tool_resp or not tool_resp.strip():
+        return None
+
+    # 1. Check explicit multi-word failure expressions
+    for pat in _MULTI_WORD_FAILURE_PATTERNS:
+        m = pat.search(tool_resp)
+        if m:
+            return m.group(0)
+
+    # 2. Strip benign negative patterns before testing general error/failed words
+    cleaned_resp = tool_resp
+    for benign_pat in _BENIGN_ERROR_PATTERNS:
+        cleaned_resp = benign_pat.sub(" ", cleaned_resp)
+
+    # 3. Check single-word failure terms on word boundaries
+    match = _SINGLE_WORD_FAILURE_PATTERN.search(cleaned_resp)
+    if match:
+        return match.group(0)
+
+    return None
 
 
 def _check_step_outcome(
@@ -132,12 +171,13 @@ def _check_step_outcome(
     active_subgoal: SubgoalRecord,
     next_subgoal: Optional[SubgoalRecord],
     subgoal_step_count: int,
+    max_subgoal_steps: int = 10,
 ) -> Tuple[str, Optional[str]]:
     """Apply explicit outcome mapping rules to evaluate active subgoal state.
 
     Returns:
         (new_status, trigger_reason)
-        Where new_status is one of: "in_progress", "completed", "failed"
+        Where new_status is one of: "in_progress", "completed", "failed", "stalled_advanced"
     """
     tool_resp = str(step_record.get("tool_response") or "").lower()
     reasoning = str(step_record.get("reasoning") or "").lower()
@@ -146,10 +186,10 @@ def _check_step_outcome(
 
     combined_step_text = f"{reasoning} {action} {action_args} {tool_resp}"
 
-    # --- Rule F1: Critical Failure Detection ---
-    for kw in _FAILURE_KEYWORDS:
-        if kw in tool_resp:
-            return SubgoalStatus.FAILED.value, f"Step tool response contained failure keyword '{kw}'"
+    # --- Rule F1: Critical Failure Detection (F-07) ---
+    failure_term = _detect_tool_failure(tool_resp)
+    if failure_term:
+        return SubgoalStatus.FAILED.value, f"Step tool response contained failure keyword '{failure_term}'"
 
     # --- Rule S1: Alignment with Next Subgoal (Early Advancement) ---
     if next_subgoal:
@@ -169,19 +209,31 @@ def _check_step_outcome(
             if subgoal_step_count >= 1:
                 return SubgoalStatus.COMPLETED.value, f"Observation confirmed success keyword '{kw}'"
 
-    # --- Rule S3: Max Step Threshold Auto-Advancement ---
-    # If a subgoal has taken >=6 steps without error, mark as stalled_advanced (NOT completed)
-    if subgoal_step_count >= 6:
-        return SubgoalStatus.STALLED_ADVANCED.value, f"Subgoal step threshold reached ({subgoal_step_count} steps without completion — force advanced)"
+    # --- Rule S3: Max Step Threshold Auto-Advancement (F-08) ---
+    # NOTE: The default threshold (10 steps) is an empirical heuristic baseline based on
+    # typical multi-step actions (which empirical agent benchmarks show often take 7-12 steps)
+    # without prematurely marking active subgoals as stalled. This threshold is uncalibrated
+    # against domain-specific distributions and is fully configurable via constructor / GuardConfig.
+    if subgoal_step_count >= max_subgoal_steps:
+        return SubgoalStatus.STALLED_ADVANCED.value, (
+            f"Subgoal step threshold reached ({subgoal_step_count} steps >= max {max_subgoal_steps} "
+            "without completion — force advanced)"
+        )
 
     # Default: Continue in progress
     return SubgoalStatus.IN_PROGRESS.value, None
 
 
 class SubgoalTracker:
-    """Stateful subgoal tracker for a single agent trajectory run."""
+    """Stateful subgoal tracker for a single agent trajectory run.
 
-    def __init__(self) -> None:
+    Args:
+        max_subgoal_steps: Maximum steps permitted for an active subgoal before Rule S3
+            auto-advances it as STALLED_ADVANCED. Defaults to 10 (uncalibrated baseline).
+    """
+
+    def __init__(self, max_subgoal_steps: int = 10) -> None:
+        self.max_subgoal_steps = max(1, int(max_subgoal_steps))
         self._subgoals: List[SubgoalRecord] = []
         self._active_idx: int = 0
         self._is_fallback: bool = False
@@ -285,7 +337,7 @@ class SubgoalTracker:
 
             # Map step outcome to status transition
             new_status, trigger_reason = _check_step_outcome(
-                step_record, active, next_subgoal, subgoal_step_count
+                step_record, active, next_subgoal, subgoal_step_count, max_subgoal_steps=self.max_subgoal_steps
             )
 
             # Handle state transitions

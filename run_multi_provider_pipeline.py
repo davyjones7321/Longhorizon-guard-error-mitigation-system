@@ -4,7 +4,7 @@ Sequential Multi-Provider Judge Pipeline
 ----------------------------------------
 Judges 100 agent run records from sorted.json sequentially using multiple LLM providers:
 1. Cloudflare Workers AI (@cf/meta/llama-3.3-70b-instruct-fp8-fast) - Records #1..22
-2. Google Gemini (gemini-3.6-flash) - Records #23..28
+2. Google Gemini (gemini-2.5-flash) - Records #23..28
 3. Provider #3 (Groq qwen3.6-27b / Gemini alternate models / Cerebras) - Records #29..100
 
 Output directory: findings/providers/
@@ -206,13 +206,13 @@ def call_cloudflare_llama(payload: Dict[str, Any], cf_account_id: str, cf_token:
         return None, False, f"CF Exception: {e}"
 
 def call_gemini_flash(payload: Dict[str, Any], gemini_key: str) -> Tuple[Optional[Dict[str, Any]], bool, str]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     prompt = f"{JUDGE_SYSTEM_PROMPT}\n\nAnalyze this agent trajectory:\n{json.dumps(payload, indent=2)}\n\nOutput JSON:"
     req_data = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
     }).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "x-goog-api-key": gemini_key}
 
     req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
     try:
@@ -278,14 +278,15 @@ def call_provider3_multi(payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, An
     # 2. Try Gemini alternate models (each has separate 20 RPD free tier quota)
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
-        for g_model in ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.7-flash"]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{g_model}:generateContent?key={gemini_key}"
+        for g_model in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{g_model}:generateContent"
             req_data = json.dumps({
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
             }).encode("utf-8")
+            headers = {"Content-Type": "application/json", "x-goog-api-key": gemini_key}
             try:
-                req = urllib.request.Request(url, data=req_data, headers={"Content-Type": "application/json"}, method="POST")
+                req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     body = json.loads(resp.read().decode("utf-8"))
                     candidates = body.get("candidates", [])
@@ -426,10 +427,10 @@ def main():
             time.sleep(3.5)
 
     # =========================================================================
-    # STAGE 2: Google Gemini (gemini-3.6-flash) (HANDOFF)
+    # STAGE 2: Google Gemini (gemini-2.5-flash) (HANDOFF)
     # =========================================================================
     if len(gemini_judgments) < 6 and handoff_cf_to_gemini and not handoff_gemini_to_p3:
-        print(f"\n--- STAGE 2: Google Gemini (gemini-3.6-flash) (HANDOFF) ---")
+        print(f"\n--- STAGE 2: Google Gemini (gemini-2.5-flash) (HANDOFF) ---")
         current_record_idx = handoff_cf_to_gemini
         while current_record_idx <= total_records:
             if current_record_idx in already_done_indices:
@@ -467,7 +468,7 @@ def main():
                 "root_cause_justification": judgment.get("root_cause_justification"),
                 "step_annotations": judgment.get("step_annotations", []),
                 "provider": "Google Gemini",
-                "model": "gemini-3.6-flash",
+                "model": "gemini-2.5-flash",
                 "metadata": meta
             }
             gemini_judgments.append(record_entry)
@@ -547,7 +548,7 @@ def main():
     print(f"  - Quota Handoff Triggered: Yes, at Record #23 (Cloudflare Daily Neuron Limit Exceeded)")
     print(f"  - Output File: {cf_file.resolve()}")
 
-    print(f"\nProvider #2 (Google Gemini gemini-3.6-flash):")
+    print(f"\nProvider #2 (Google Gemini gemini-2.5-flash):")
     print(f"  - Completed Records: {len(gemini_judgments)} (Records #23 to #28)")
     print(f"  - Rate Limit Handoff Triggered: Yes, at Record #29 (Google Gemini 20 RPD Daily Limit Exceeded)")
     print(f"  - Output File: {gemini_file.resolve()}")

@@ -16,7 +16,10 @@ import logging
 try:
     from error_definitions import ErrorDefinitionsLoader
 except ImportError:
-    from longhorizon_guard.taxonomy.agentdebug_detector.error_definitions import ErrorDefinitionsLoader
+    try:
+        from research.agentdebug_detector.error_definitions import ErrorDefinitionsLoader
+    except ImportError:
+        from longhorizon_guard.taxonomy.agentdebug_detector.error_definitions import ErrorDefinitionsLoader
 
 try:
     from rate_limits import _groq_rate_limit
@@ -635,14 +638,14 @@ REQUIRED OUTPUT FORMAT (JSON):
                 "temperature": self.config.get('temperature', 0.0)
             }
         elif is_gemini:
-            gemini_model = model_name if model_name.startswith('gemini-') else 'gemini-3.5-flash-lite'
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={self.config['api_key']}"
+            gemini_model = model_name if model_name.startswith('gemini-') else 'gemini-2.5-flash'
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
             full_text = f"{system_instruction}\n\n{prompt}"
             payload = {
                 "contents": [{"parts": [{"text": full_text}]}],
                 "generationConfig": {"responseMimeType": "application/json", "temperature": self.config.get('temperature', 0.0)}
             }
-            headers = {"Content-Type": "application/json", "User-Agent": "curl/8.0.1"}
+            headers = {"Content-Type": "application/json", "User-Agent": "curl/8.0.1", "x-goog-api-key": self.config['api_key']}
         else:
             url = self.config['base_url']
             headers = self.headers

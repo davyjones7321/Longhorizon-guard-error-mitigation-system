@@ -27,6 +27,50 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = "1.0"
 DEFAULT_OUTPUT_PATH = os.path.join("findings", "antigravity_sessions.json")
 
+CREDENTIAL_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    # OpenAI, OpenRouter, Anthropic secret keys
+    (re.compile(r"\b(sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_\-]{20,})\b"), "sk-***REDACTED***"),
+    # Google Gemini / Cloud API keys
+    (re.compile(r"\b(AIzaSy[A-Za-z0-9_\-]{33})\b"), "AIzaSy***REDACTED***"),
+    # Groq API keys
+    (re.compile(r"\b(gsk_[A-Za-z0-9]{20,})\b"), "gsk_***REDACTED***"),
+    # NVIDIA NIM API keys
+    (re.compile(r"\b(nvapi-[A-Za-z0-9_\-]{20,})\b"), "nvapi-***REDACTED***"),
+    # TokenRouter API keys
+    (re.compile(r"\b(tr-[A-Za-z0-9_\-]{20,})\b"), "tr-***REDACTED***"),
+    # Authorization: Bearer tokens
+    (re.compile(r"\b(Bearer\s+)([A-Za-z0-9\._\-]{20,})\b", re.IGNORECASE), r"\1***REDACTED***"),
+    # Key assignment patterns: api_key="...", secret='...'
+    (
+        re.compile(
+            r'((?:api[_-]?key|access[_-]?token|auth[_-]?token|secret)\s*[:=]\s*["\'])([A-Za-z0-9_\-\.]{20,})(["\'])',
+            re.IGNORECASE,
+        ),
+        r"\1***REDACTED***\3",
+    ),
+]
+
+
+def sanitize_text(text: str) -> str:
+    """Mask known credentials and sensitive tokens in text with ***REDACTED***."""
+    if not text or not isinstance(text, str):
+        return text
+    sanitized = text
+    for pattern, replacement in CREDENTIAL_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
+    return sanitized
+
+
+def sanitize_data(data: Any) -> Any:
+    """Recursively sanitize all string values in nested dictionaries and lists."""
+    if isinstance(data, str):
+        return sanitize_text(data)
+    elif isinstance(data, dict):
+        return {k: sanitize_data(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_data(item) for item in data]
+    return data
+
 
 def _parse_iso_timestamp(ts_str: Optional[str]) -> Optional[float]:
     """Parse ISO timestamp string to Unix epoch seconds."""
@@ -244,10 +288,11 @@ def process_session(
         "source_llm_model": model_name,
     }
 
-    run_record = {
+    raw_record = {
         "metadata": metadata,
         "trajectory": {"schema_version": SCHEMA_VERSION, "steps": steps} if steps else None,
     }
+    run_record = sanitize_data(raw_record)
 
     # Upsert into consolidated JSON
     runs: List[Dict[str, Any]] = []
@@ -272,9 +317,12 @@ def process_session(
     else:
         runs.append(run_record)
 
+    # Apply sanitization to ensure no unsanitized credentials touch disk
+    sanitized_runs = sanitize_data(runs)
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump({"runs": runs}, f, ensure_ascii=False, indent=2)
+        json.dump({"runs": sanitized_runs}, f, ensure_ascii=False, indent=2)
 
     return run_record
 
@@ -302,7 +350,7 @@ def main() -> None:
         # Fallback dummy payload for dry-run CLI test
         payload = {
             "conversationId": "test_dry_run_session",
-            "modelName": "gemini-3.6-flash",
+            "modelName": "gemini-2.5-flash",
             "terminationReason": "model_stop",
             "transcriptPath": "",
         }

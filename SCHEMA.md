@@ -66,7 +66,7 @@ A single JSON object representing the execution metadata of one trial.
 | `tag_source` | `string` or `null` | Source of the tag (`"human"`, `"llm_judge"`, `"agenterrorbench_import"`, etc.). |
 | `task_description` | `string` or `null` | Full human-readable task description or prompt text. |
 | `source_dataset` | `string` or `null` | Origin dataset or platform name (e.g. `"agenterrorbench"`, `"antigravity_session"`). |
-| `source_llm_model` | `string` or `null` | LLM model identifier used during the session (e.g. `"gemini-3.6-flash"`, `"GPT-4o"`). |
+| `source_llm_model` | `string` or `null` | LLM model identifier used during the session (e.g. `"gemini-2.5-flash"`, `"GPT-4o"`). |
 
 ---
 

@@ -39,7 +39,7 @@ The package implements a modular, non-blocking 4-hook interface (`GuardInterface
              |          +---> Layer A: Broad-Corpus TF-IDF Pattern Matcher
              |          +---> Layer B: Structural & Heuristic Rule Detectors
              |          +---> SubgoalTracker (State & Rule S3 Status)
-             |          +---> DriftMonitor (Severity: LOW / MEDIUM / HIGH)
+             |          +---> DriftMonitor (Severity: none / low / medium / high / critical)
              |          +---> PlanReflector (Dual Triggers & Coincidence Guard)
              |
              +---> 3. on_subgoal_boundary(subgoal_id, status)
@@ -56,17 +56,17 @@ The package implements a modular, non-blocking 4-hook interface (`GuardInterface
 
 2. **Subgoal Tracker (`subgoals/tracker.py`)**:
    - Parses agent-declared plans into structured subgoals.
-   - Tracks state transitions: `not_started`, `in_progress`, `completed`, `failed`.
-   - Implements Rule S3: assigns `stalled_advanced` status when an agent is forced to advance to a subsequent subgoal without completing the current one.
+   - Tracks state transitions across the full `SubgoalStatus` lifecycle: `not_started`, `in_progress`, `completed`, `stalled_advanced`, `failed`, and `abandoned`.
+   - Implements Rule S3: assigns `stalled_advanced` status when an agent exceeds the maximum step limit (default: 10 steps, configurable via `max_subgoal_steps`) and is forced to advance to a subsequent subgoal without completing the current one.
 
 3. **Drift Monitor (`drift_monitor/monitor.py`)**:
-   - Assesses trajectory drift severity (`LOW`, `MEDIUM`, `HIGH`).
-   - Triggers elevated drift when accumulated failure thresholds are met (2 or more failed subgoals, 2 or more stalled subgoals, or a slow progress ratio).
+   - Assesses trajectory drift severity across 5 discrete levels: `none`, `low`, `medium`, `high`, and `critical` (mapped from numeric drift score [0.0, 1.0]).
+   - Flags drift when severity score meets or exceeds `drift_threshold` (default: 0.35, configurable via `GuardConfig`), triggered by accumulated signals (repeated stalled subgoals, slow progress ratio, accumulated subgoal failures, or pattern repetition).
    - Degrades gracefully when pattern or subgoal data is absent.
 
 4. **Plan Reflector (`reflector/reflector.py`)**:
    - Evaluates whether the active plan remains viable.
-   - Invalidates plans when 2 or more subgoals fail or when drift severity reaches `HIGH`.
+   - Invalidates plans when 2 or more subgoals fail or when drift severity reaches `high` or `critical`.
    - Uses dual triggers (subgoal boundaries and step intervals) coupled with a coincidence guard to prevent duplicate evaluations.
 
 5. **Fail-Open System Contract**:
@@ -127,7 +127,12 @@ guard = GuardInterface()
 # Hook 1: Register initial task description and plan
 task_description = "Locate item in WebShop and complete purchase"
 proposed_plan = "1. Search for item\n2. Select options\n3. Click buy now"
-guard.on_plan_proposed(task_description, proposed_plan, metadata={"task_id": "webshop_01"})
+plan_res = guard.on_plan_proposed(task_description, proposed_plan, metadata={"task_id": "webshop_01"})
+
+# Non-blocking contract: 'approved' means no internal hard error, 'flagged' means guard found an issue
+if plan_res["flagged"]:
+    print(f"Plan Warnings: {plan_res['flags']}")
+    print(f"Plan Suggestions: {plan_res['suggestions']}")
 
 # Hook 2: Process execution steps inside the agent loop
 history = []
@@ -173,6 +178,96 @@ print(f"Root Cause Source: {summary['root_cause_source']}")  # 'pattern_match' |
 print(f"Root Cause Category: {summary['root_cause_error_type']}")
 print(f"Root Cause Step Index: {summary['root_cause_step_index']}")
 ```
+
+#### Centralized Configuration (`GuardConfig`)
+
+`GuardInterface` accepts an optional `config: GuardConfig` parameter for structured parameter tuning. When no `config` object is passed, `GuardInterface()` automatically defaults to `GuardConfig.from_env()`, which reads active environment variables (e.g., `GUARD_MAX_SUBGOAL_STEPS`, `GUARD_DRIFT_THRESHOLD`, `GUARD_FAIL_OPEN`) or falls back to built-in system defaults.
+
+Individual keyword arguments passed to `GuardInterface()` (`pattern_library_path`, `max_subgoal_steps`, `drift_threshold`, `category_thresholds`, `match_timeout`) take direct precedence and override values from `config`:
+
+```python
+from longhorizon_guard import GuardInterface, GuardConfig
+
+# Approach 1: Structured configuration object
+config = GuardConfig(
+    max_subgoal_steps=12,          # S3 step ceiling before marking stalled_advanced (default: 10)
+    drift_threshold=0.30,          # Severity threshold [0.0, 1.0] to flag drift_detected (default: 0.35)
+    reflection_step_interval=4,    # Cadence for periodic plan validity checks (default: 5)
+    fail_open=True,                # Catch internal errors without breaking agent (default: True)
+)
+guard = GuardInterface(config=config)
+
+# Approach 2: Direct constructor keyword argument overrides
+guard = GuardInterface(
+    max_subgoal_steps=8,
+    drift_threshold=0.40,
+)
+```
+
+### 3. Automatic Integrations (Zero-Change & Middleware)
+
+If you use LangChain / LangGraph or standard OpenAI-compatible client libraries, you do not need to manually instrument your agent loops. LongHorizon Guard provides two native adapters:
+
+#### Path A: LangChain / LangGraph Callback Handler
+Add `LongHorizonGuardCallback` to your agent executor or chain. It automatically intercepts `on_chain_start`, `on_agent_action`, `on_tool_end` / `on_tool_error`, and `on_chain_end`, translating events into `GuardInterface` step records and executing the lifecycle hooks transparently:
+
+```python
+from langchain.agents import create_agent  # or AgentExecutor
+from longhorizon_guard import LongHorizonGuardCallback
+
+# 1. Instantiate callback (non-blocking logging by default)
+guard_callback = LongHorizonGuardCallback()
+
+# Optional: supply an on_flag hook if your host application wants to actively intervene
+def handle_guard_alert(step_res):
+    print(f"Intervention needed! Guard flagged: {step_res['warning']}")
+
+guard_callback = LongHorizonGuardCallback(on_flag=handle_guard_alert)
+
+# 2. Pass directly to your LangChain agent — ZERO changes to your agent loop
+agent = create_agent(..., callbacks=[guard_callback])
+result = agent.invoke({"input": "Find the latest ACME report and extract numbers."})
+
+# 3. Retrieve final trajectory summary
+print(guard_callback.last_run_summary)
+```
+
+#### Path B: OpenAI-Compatible Client Middleware (`wrap_guard`)
+For custom agents using `openai.OpenAI()` or any OpenAI-compatible client (such as local Ollama, vLLM, DeepSeek, or Groq), `wrap_guard()` intercepts `client.chat.completions.create()`:
+
+```python
+import openai
+from longhorizon_guard import wrap_guard
+
+# 1. Wrap your client once
+client = wrap_guard(openai.OpenAI())
+
+# 2. Run your normal multi-turn tool-calling loop unmodified
+# The wrapper observes tool calls, correlates tool responses, and calls on_step() automatically
+messages = [{"role": "user", "content": "Search for Python docs and summarize."}]
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=messages,
+    tools=[...],
+)
+
+# ... your normal tool execution loop ...
+
+# 3. Explicitly finalize when your task is complete
+run_summary = client.finalize_run()
+print(f"Root cause step: {run_summary['root_cause_step_index']}")
+```
+
+#### Honest Integration Boundaries: What is Automatic vs. What Still Requires Setup
+- **LangChain / LangGraph (`LongHorizonGuardCallback`)**:
+  - **Truly Automatic**: Plan extraction from initial inputs, step-by-step reasoning/tool/observation tracking, trajectory history maintenance, and `on_run_end` execution on chain finish.
+  - **Requires Setup**: Active intervention. By default, the guard is non-blocking (logs warnings). If you want the agent to abort or re-prompt on flags, you must provide an `on_flag` callable.
+- **OpenAI Client Wrapper (`wrap_guard`)**:
+  - **Truly Automatic**: Multi-turn tool call correlation (pairs assistant `tool_calls` with subsequent `role: "tool"` messages), schema translation into `step_record`, and transparent pass-through of all API responses and errors.
+  - **Requires Setup**:
+    1. **Calling `finalize_run()`**: An LLM client has no universal concept of when an agent's multi-step task is complete (some finish in 1 call, some loop 20 times). You must call `client.finalize_run()` when your loop terminates.
+    2. **Task/Plan Heuristic**: The wrapper treats the initial user message as the task description. If your agent uses a separate formal planning phase, explicit registration via `client.guard.on_plan_proposed(...)` gives higher precision than the heuristic.
 
 ---
 
@@ -251,7 +346,7 @@ Run the full pytest suite:
 pytest tests/ -v
 ```
 
-> **Note on E2E Smoke Tests**: The repository includes pre-mined pattern libraries and holdout validation datasets. Tests requiring the full 77.6MB `findings/agenterrorbench_converted.json` benchmark dataset will cleanly skip if the file is absent. To run the full live benchmark smoke suite, download the dataset from [THUDM/AgentErrorBench](https://github.com/THUDM/AgentErrorBench) (or HuggingFace) into your local `findings/` directory.
+> **Note on E2E Smoke Tests**: The end-to-end smoke tests in `tests/test_smoke_e2e.py` run against a dedicated, bundled fixture (`tests/fixtures/e2e_smoke_trajectories.json`) containing real trajectories with zero external network or dataset dependencies. Full 77.6MB benchmark training datasets remain optional for local re-mining.
 
 ---
 

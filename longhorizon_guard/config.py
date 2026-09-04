@@ -3,25 +3,32 @@ Configuration management for longhorizon_guard.
 """
 
 import os
-from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Optional
+
 
 @dataclass
 class GuardConfig:
-    """Configurable paths and settings for longhorizon_guard."""
-    data_dir: Path = field(default_factory=lambda: Path("output"))
-    tags_path: Path = field(default_factory=lambda: Path("output/tags.csv"))
-    clean_runs_dir: Path = field(default_factory=lambda: Path("eval/clean_runs"))
+    """Centralized configuration for GuardInterface and monitoring sub-engines."""
+
+    pattern_library_path: Optional[str] = None
+    similarity_threshold: float = 0.82
+    max_subgoal_steps: int = 10
+    drift_threshold: float = 0.35
+    reflection_step_interval: int = 5
+    fail_open: bool = True
     provider: str = "gemini"
     model: str = "gemini-2.5-flash"
-    api_key_env_var: str = "GEMINI_API_KEY"
 
     @classmethod
     def from_env(cls) -> "GuardConfig":
         return cls(
-            data_dir=Path(os.getenv("GUARD_DATA_DIR", "output")),
-            tags_path=Path(os.getenv("GUARD_TAGS_PATH", "output/tags.csv")),
-            clean_runs_dir=Path(os.getenv("GUARD_CLEAN_RUNS_DIR", "eval/clean_runs")),
+            pattern_library_path=os.getenv("GUARD_PATTERN_LIB_PATH"),
+            similarity_threshold=float(os.getenv("GUARD_SIMILARITY_THRESHOLD", "0.82")),
+            max_subgoal_steps=int(os.getenv("GUARD_MAX_SUBGOAL_STEPS", "10")),
+            drift_threshold=float(os.getenv("GUARD_DRIFT_THRESHOLD", "0.35")),
+            reflection_step_interval=int(os.getenv("GUARD_REFLECTION_INTERVAL", "5")),
+            fail_open=os.getenv("GUARD_FAIL_OPEN", "true").lower() in ("true", "1", "yes"),
             provider=os.getenv("GUARD_PROVIDER", "gemini"),
             model=os.getenv("GUARD_MODEL", "gemini-2.5-flash"),
         )

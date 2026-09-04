@@ -3,6 +3,7 @@ Unit tests for longhorizon_guard.storage.reader validating dataset loading and S
 """
 
 import json
+import logging
 from pathlib import Path
 import pytest
 from longhorizon_guard.storage.reader import (
@@ -142,3 +143,29 @@ def test_load_dataset_invalid_paths_and_formats(tmp_path):
     empty_dir.mkdir()
     with pytest.raises(ValueError, match="No valid run_metadata.json files found"):
         load_dataset(empty_dir)
+
+
+def test_find_all_runs_logs_warning_on_corrupted_file(tmp_path, caplog):
+    """Assert find_all_runs() logs a warning and skips corrupted metadata files instead of crashing."""
+    valid_dir = tmp_path / "run_valid"
+    valid_dir.mkdir()
+    valid_meta = {
+        "run_id": "valid_001",
+        "task_id": "task_valid",
+        "trial_number": 1,
+        "final_status": "success",
+    }
+    (valid_dir / "run_metadata.json").write_text(json.dumps(valid_meta), encoding="utf-8")
+    (valid_dir / "trajectory.json").write_text(json.dumps({"steps": []}), encoding="utf-8")
+
+    corrupt_dir = tmp_path / "run_corrupt"
+    corrupt_dir.mkdir()
+    (corrupt_dir / "run_metadata.json").write_text("NOT_VALID_JSON{{{", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="longhorizon_guard.storage.reader"):
+        runs = find_all_runs(tmp_path)
+
+    assert len(runs) == 1
+    assert runs[0]["metadata"]["run_id"] == "valid_001"
+    assert any("Skipping corrupted run" in record.message for record in caplog.records)
+

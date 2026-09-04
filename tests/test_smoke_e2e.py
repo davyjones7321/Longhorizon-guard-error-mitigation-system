@@ -24,59 +24,26 @@ from longhorizon_guard.interface import GuardInterface
 from longhorizon_guard.storage.reader import load_dataset
 
 FINDINGS_DIR = REPO_ROOT / "findings"
-CLEAN_PATH = str(FINDINGS_DIR / "all_clean_outputs.json")
-JUDGED_PATH = str(FINDINGS_DIR / "holdout_v2_judged.json")
-CONVERTED_PATH = str(FINDINGS_DIR / "agenterrorbench_converted.json")
 PATTERN_LIB_PATH = str(FINDINGS_DIR / "pattern_library.json")
-
-HAS_CONVERTED_DATASET = Path(CONVERTED_PATH).exists()
-skip_without_converted = pytest.mark.skipif(
-    not HAS_CONVERTED_DATASET,
-    reason="findings/agenterrorbench_converted.json absent (download THUDM/AgentErrorBench dataset to enable full smoke test suite)",
-)
+FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "e2e_smoke_trajectories.json"
 
 
 @pytest.fixture(scope="module")
 def dataset_records():
-    """Load real datasets once for E2E smoke tests."""
-    if not os.path.exists(CONVERTED_PATH):
-        pytest.skip(
-            "findings/agenterrorbench_converted.json absent (download THUDM/AgentErrorBench dataset to enable full smoke test suite)"
-        )
+    """Load bundled real trajectories for E2E smoke tests (zero external dependencies)."""
+    with open(FIXTURE_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    clean_runs = load_dataset(CLEAN_PATH)
-    converted_runs = load_dataset(CONVERTED_PATH)
-    conv_map = {r["metadata"]["run_id"]: r for r in converted_runs}
+    assert "t1" in data, "Failed to locate Clean candidate t1 in fixture"
+    assert "t2" in data, "Failed to locate Planning Error candidate t2 in fixture"
+    assert "t3" in data, "Failed to locate Long Trajectory candidate t3 in fixture"
 
-    with open(JUDGED_PATH, "r", encoding="utf-8") as f:
-        judged_data = json.load(f)
-
-    # 1. Clean run candidate with zero flags
-    t1_cand = None
-    for r in clean_runs:
-        if len(r.get("trajectory", {}).get("steps", [])) >= 3:
-            t1_cand = r
-            if r["metadata"]["run_id"] == "54043951-0c93-467f-afbf-12be71bc8989":
-                break
-
-    # 2. Judged planning_error run candidate where pred == gt == 'planning_error'
-    t2_cand = conv_map.get("Qwen3-8B_021_id_21___chat_b012_t00_e02-1e119842")
-
-    # 3. Long trajectory candidate (30 steps, multiple subgoals)
-    t3_cand = conv_map.get("GPT-4o_027_alfworld_task_027")
-
-    assert t1_cand is not None, "Failed to locate Clean candidate for T1"
-    assert t2_cand is not None, "Failed to locate Planning Error candidate for T2"
-    assert t3_cand is not None, "Failed to locate Long Trajectory candidate for T3"
-
-    return {"t1": t1_cand, "t2": t2_cand, "t3": t3_cand}
+    return {"t1": data["t1"], "t2": data["t2"], "t3": data["t3"]}
 
 
-@skip_without_converted
 class TestEndToEndSmokePipeline:
     """E2E verification of GuardInterface running real agent trajectories."""
 
-    @skip_without_converted
     def test_trajectory_1_clean_run_no_false_positives(self, dataset_records):
         """Trajectory 1 (Clean Run): Verify zero false positives across full pipeline."""
         run_data = dataset_records["t1"]
@@ -134,7 +101,6 @@ class TestEndToEndSmokePipeline:
         assert len(run_res["flags_summary"]) == 0
         assert run_res["root_cause_error_type"] is None
 
-    @skip_without_converted
     def test_trajectory_2_known_planning_error_signals(self, dataset_records):
         """Trajectory 2 (Known Planning Error): Verify signals surface by run end."""
         run_data = dataset_records["t2"]
@@ -179,7 +145,6 @@ class TestEndToEndSmokePipeline:
         assert total_flags > 0 or refl_suggested_count > 0, "Trajectory 2 failed to surface any error signals"
         assert root_cause in ("planning_error", "reflection_error") or refl_suggested_count > 0
 
-    @skip_without_converted
     def test_trajectory_3_long_run_triggers_and_coincidence_guard(self, dataset_records):
         """Trajectory 3 (Long Run 30 steps): Verify both reflector triggers, coincidence guard, and summary consistency."""
         run_data = dataset_records["t3"]

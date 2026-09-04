@@ -65,7 +65,7 @@ def resolve_provider_llm_call(
     """Resolve the LLM call function, env var name, model name, and endpoint URL based on --provider."""
     if provider == "gemini":
         env_var = api_key_var or "GEMINI_API_KEY"
-        model_name = model or "gemini-3.6-flash"
+        model_name = model or "gemini-2.5-flash"
         endpoint_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         llm_call = create_gemini_llm_call(api_key_env_var=env_var, model=model_name)
     elif provider == "openrouter":

@@ -5,8 +5,11 @@ No dependencies on harness code (evalharness).
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 REQUIRED_METADATA_FIELDS = ["run_id", "task_id", "trial_number", "final_status"]
 
@@ -79,8 +82,8 @@ def find_all_runs(search_dir: Union[str, Path]) -> List[Dict[str, Any]]:
         try:
             run_data = load_run(meta_file)
             runs.append(run_data)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Skipping corrupted run %s: %s", meta_file, exc)
 
     return runs
 

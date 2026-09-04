@@ -4,8 +4,12 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-from longhorizon_guard.taxonomy.agentdebug_detector.fine_grained_analysis import ErrorTypeDetector
-from longhorizon_guard.taxonomy.agentdebug_detector.critical_error_detection import CriticalErrorAnalyzer
+try:
+    from research.agentdebug_detector.fine_grained_analysis import ErrorTypeDetector
+    from research.agentdebug_detector.critical_error_detection import CriticalErrorAnalyzer
+except ImportError:
+    from longhorizon_guard.taxonomy.agentdebug_detector.fine_grained_analysis import ErrorTypeDetector
+    from longhorizon_guard.taxonomy.agentdebug_detector.critical_error_detection import CriticalErrorAnalyzer
 from longhorizon_guard.taxonomy.agentdebug_adapter import convert_to_agentdebug_format
 
 
@@ -71,12 +75,12 @@ async def run_two_stage(run: Dict[str, Any], provider: str = "gemini") -> Option
         api_config = {
             "base_url": "https://generativelanguage.googleapis.com/v1beta",
             "api_key": gemini_key,
-            "model": "gemini-3.5-flash-lite",
+            "model": "gemini-2.5-flash",
             "temperature": 0.0,
             "max_retries": 3,
             "timeout": 60,
         }
-        provider_label = "AgentDebug 2-stage (Gemini gemini-3.5-flash-lite)"
+        provider_label = "AgentDebug 2-stage (Gemini gemini-2.5-flash)"
     else:
         groq_key = os.environ.get("GROQ_API_KEY")
         if not groq_key:

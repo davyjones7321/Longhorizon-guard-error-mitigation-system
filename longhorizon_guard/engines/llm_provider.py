@@ -266,13 +266,16 @@ async def _call_direct_gemini(
     model_name = model or "gemini-2.5-flash"
     endpoint = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model_name}:generateContent?key={gemini_key}"
+        f"{model_name}:generateContent"
     )
     req_data = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.0}
     }).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": gemini_key,
+    }
 
     for attempt in range(5):
         try:

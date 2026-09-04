@@ -185,7 +185,7 @@ class TestStalledAdvancedStatus:
     """Verify that Rule S3 forced-advance produces stalled_advanced status."""
 
     def test_s3_forced_advance_produces_stalled_advanced(self):
-        tracker = SubgoalTracker()
+        tracker = SubgoalTracker(max_subgoal_steps=6)
         tracker.init_plan(
             task_description="Long search task",
             proposed_plan="1. Search drawers for key\n2. Open locked box",
@@ -241,7 +241,7 @@ class TestStalledAdvancedStatus:
         assert state["stalled_advanced_subgoals_count"] == 0
 
     def test_on_run_end_reports_stalled_advanced_bucket(self):
-        guard = GuardInterface(pattern_library_path=PATTERN_LIB_PATH)
+        guard = GuardInterface(pattern_library_path=PATTERN_LIB_PATH, max_subgoal_steps=6)
         guard.on_plan_proposed(
             task_description="Task",
             proposed_plan="1. Subgoal A\n2. Subgoal B",
@@ -419,3 +419,109 @@ class TestDriftMonitorPayloadSchema:
         assert d["total_subgoals_count"] == 2
         assert d["active_subgoal_index"] == 0
         assert d["status"] == SubgoalStatus.IN_PROGRESS.value
+
+
+class TestRuleF1WordBoundariesAndBenignPhrasing:
+    """Verify Rule F1 word-boundary matching and benign negative-pattern handling (FIX F-07)."""
+
+    def test_benign_error_mentions_do_not_trigger_f1(self):
+        """Benign phrases mentioning error ('0 errors', 'no error', etc.) must NOT mark subgoal as failed."""
+        benign_responses = [
+            "Test suite passed with 0 errors and 0 warnings.",
+            "Execution completed: no error detected during run.",
+            "Diagnostic status: error: none.",
+            "Completed linting: errors: 0.",
+            "File transfer finished without error.",
+        ]
+
+        for idx, resp in enumerate(benign_responses):
+            tracker = SubgoalTracker()
+            tracker.init_plan("Task", "1. Execute benign task")
+            res = tracker.process_step(
+                {
+                    "step_index": 0,
+                    "reasoning": "Checking status",
+                    "action_name": "check",
+                    "tool_response": resp,
+                },
+                history=[],
+            )
+            state = res["state_payload"]
+            assert state["status"] == SubgoalStatus.IN_PROGRESS.value, (
+                f"Benign tool response incorrectly triggered failure: '{resp}'"
+            )
+            assert state["failed_subgoals_count"] == 0
+
+    def test_real_failure_messages_trigger_f1(self):
+        """Genuine failure messages must immediately mark subgoal as failed."""
+        failure_responses = [
+            "Execution error: connection timed out after 30s",
+            "Error: unable to locate specified target file",
+            "Process failed with exit status 1",
+            "Command rejected: syntax error near unexpected token",
+            "Action failed: invalid action parameters",
+            "Agent could not proceed: cannot find requested item",
+        ]
+
+        for idx, resp in enumerate(failure_responses):
+            tracker = SubgoalTracker()
+            tracker.init_plan("Task", "1. Execute critical task")
+            res = tracker.process_step(
+                {
+                    "step_index": 0,
+                    "reasoning": "Attempting action",
+                    "action_name": "run",
+                    "tool_response": resp,
+                },
+                history=[],
+            )
+            trans = res["transition_event"]
+            assert trans is not None, f"Expected failure transition for: '{resp}'"
+            assert trans["completed_status"] == SubgoalStatus.FAILED.value
+            assert "failure keyword" in trans["trigger_reason"]
+
+
+class TestConfigurableMaxSubgoalSteps:
+    """Verify configurable max_subgoal_steps threshold (FIX F-08)."""
+
+    def test_custom_step_threshold_advances_at_configured_count(self):
+        """Subgoal auto-advances at custom max_subgoal_steps limit."""
+        tracker = SubgoalTracker(max_subgoal_steps=3)
+        tracker.init_plan("Task", "1. Step A\n2. Step B")
+
+        for i in range(2):
+            res = tracker.process_step(
+                {"step_index": i, "reasoning": "Work", "action_name": "step", "tool_response": "neutral"},
+                history=[],
+            )
+            assert res["state_payload"]["status"] == SubgoalStatus.IN_PROGRESS.value
+
+        # 3rd step reaches max_subgoal_steps=3 threshold
+        res = tracker.process_step(
+            {"step_index": 2, "reasoning": "Work", "action_name": "step", "tool_response": "neutral"},
+            history=[],
+        )
+        assert res["transition_event"]["completed_status"] == SubgoalStatus.STALLED_ADVANCED.value
+        assert res["state_payload"]["current_subgoal_id"] == "subgoal_002"
+
+    def test_default_threshold_is_10(self):
+        """Default max_subgoal_steps is 10 (uncalibrated heuristic baseline)."""
+        tracker = SubgoalTracker()
+        assert tracker.max_subgoal_steps == 10
+
+        tracker.init_plan("Task", "1. Step A\n2. Step B")
+        # Steps 0..8 (9 steps) must remain IN_PROGRESS
+        for i in range(9):
+            res = tracker.process_step(
+                {"step_index": i, "reasoning": "Work", "action_name": "step", "tool_response": "neutral"},
+                history=[],
+            )
+            assert res["state_payload"]["status"] == SubgoalStatus.IN_PROGRESS.value
+
+        # Step 9 (the 10th step) must advance
+        res = tracker.process_step(
+            {"step_index": 9, "reasoning": "Work", "action_name": "step", "tool_response": "neutral"},
+            history=[],
+        )
+        assert res["transition_event"]["completed_status"] == SubgoalStatus.STALLED_ADVANCED.value
+

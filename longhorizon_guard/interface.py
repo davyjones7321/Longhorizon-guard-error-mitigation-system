@@ -33,6 +33,8 @@ from longhorizon_guard.drift_monitor.schema import DriftAssessment
 from longhorizon_guard.reflector.reflector import PlanReflector
 from longhorizon_guard.reflector.schema import ReflectionResult
 
+from longhorizon_guard.config import GuardConfig
+
 logger = logging.getLogger("longhorizon_guard.guard")
 
 
@@ -766,14 +768,27 @@ class GuardInterface:
 
     def __init__(
         self,
-        pattern_library_path: Optional[str] = "findings/pattern_library.json",
+        pattern_library_path: Optional[str] = None,
         category_thresholds: Optional[Dict[str, float]] = None,
         match_timeout: float = DEFAULT_MATCH_TIMEOUT_SECONDS,
+        max_subgoal_steps: Optional[int] = None,
+        drift_threshold: Optional[float] = None,
+        config: Optional[GuardConfig] = None,
     ) -> None:
-        pattern_library_path = pattern_library_path or "findings/pattern_library.json"
+        if config is None:
+            config = GuardConfig.from_env()
+
+        self.config = config
+        self.fail_open: bool = config.fail_open
+
+        effective_pattern_path = pattern_library_path or config.pattern_library_path or "findings/pattern_library.json"
+        effective_max_subgoal_steps = max_subgoal_steps if max_subgoal_steps is not None else config.max_subgoal_steps
+        effective_drift_threshold = drift_threshold if drift_threshold is not None else config.drift_threshold
+        effective_refl_interval = config.reflection_step_interval
+
         try:
             self._matcher = PatternMatcher(
-                pattern_library_path=pattern_library_path,
+                pattern_library_path=effective_pattern_path,
                 category_thresholds=category_thresholds,
                 match_timeout=match_timeout,
             )
@@ -782,22 +797,25 @@ class GuardInterface:
             self._matcher = None  # type: ignore[assignment]
 
         try:
-            self._subgoal_tracker = SubgoalTracker()
+            self._subgoal_tracker = SubgoalTracker(max_subgoal_steps=effective_max_subgoal_steps)
         except Exception:
             logger.exception("SubgoalTracker init failed — subgoal tracking disabled")
             self._subgoal_tracker = None  # type: ignore[assignment]
 
         try:
-            self._drift_monitor = DriftMonitor()
+            self._drift_monitor = DriftMonitor(drift_threshold=effective_drift_threshold)
         except Exception:
             logger.exception("DriftMonitor init failed — drift monitoring disabled")
             self._drift_monitor = None  # type: ignore[assignment]
 
         try:
-            self._reflector = PlanReflector(step_interval=5)
+            self._reflector = PlanReflector(step_interval=effective_refl_interval)
         except Exception:
             logger.exception("PlanReflector init failed — periodic plan reflection disabled")
             self._reflector = None  # type: ignore[assignment]
+
+        self._live_steps_recorded: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        self._in_replay: bool = False
 
     # ---- Hook 1: on_plan_proposed ----
 
@@ -813,12 +831,20 @@ class GuardInterface:
         Returns:
             {
                 "approved": bool,
+                "flagged": bool,
                 "flags": list[str],
                 "suggestions": list[str],
                 "subgoals": list[dict]
             }
         """
-        result: Dict[str, Any] = {"approved": True, "flags": [], "suggestions": [], "subgoals": []}
+        self._live_steps_recorded = []
+        result: Dict[str, Any] = {
+            "approved": True,
+            "flagged": False,
+            "flags": [],
+            "suggestions": [],
+            "subgoals": [],
+        }
         try:
             if self._subgoal_tracker is not None:
                 subgoal_init = self._subgoal_tracker.init_plan(task_description, proposed_plan, metadata)
@@ -877,6 +903,7 @@ class GuardInterface:
             logger.exception("on_plan_proposed error — failing open, run_id=%s",
                              (metadata or {}).get("run_id", "?"))
 
+        result["flagged"] = bool(result.get("flags"))
         return result
 
     # ---- Hook 2: on_step ----
@@ -1027,6 +1054,8 @@ class GuardInterface:
             refl = result.get("reflection_result")
             is_refl_revision = bool(refl and refl.get("revision_suggested"))
             result["flagged"] = is_matched or is_drift or is_refl_revision
+            if not getattr(self, "_in_replay", False):
+                self._live_steps_recorded.append((dict(step_record), dict(result)))
 
         return result
 
@@ -1136,6 +1165,29 @@ class GuardInterface:
             "reflection_summary": None,
         }
         try:
+            steps = trajectory.get("steps", [])
+            live_steps = list(self._live_steps_recorded)
+
+            # Branch: Standalone offline mode vs. live monitoring mode
+            if not live_steps and steps:
+                # Standalone offline/post-hoc evaluation:
+                # Replay on_step() first in chronological order to build real tracker & drift state
+                self._in_replay = True
+                replay_results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+                history: List[Dict[str, Any]] = []
+                try:
+                    for step in steps:
+                        step_res = self.on_step(step, history, metadata=metadata)
+                        replay_results.append((step, step_res))
+                        history.append(step)
+                finally:
+                    self._in_replay = False
+                processed_steps = replay_results
+            else:
+                # Live mode: use step results already captured during live execution
+                processed_steps = live_steps
+
+            # Finalize tracker & drift monitor using the current, real state
             if self._subgoal_tracker is not None:
                 result["subgoals_summary"] = self._subgoal_tracker.finalize_run(metadata, trajectory)
 
@@ -1144,7 +1196,6 @@ class GuardInterface:
                     metadata, trajectory, result.get("subgoals_summary")
                 )
 
-            steps = trajectory.get("steps", [])
             if self._reflector is not None and steps:
                 last_refl = self._reflector.evaluate(
                     step_record=steps[-1],
@@ -1157,9 +1208,8 @@ class GuardInterface:
                 result["reflection_summary"] = last_refl.to_dict()
 
             run_id = metadata.get("run_id", "unknown")
-            steps = trajectory.get("steps", [])
 
-            # Track earliest candidate across each layer:
+            # Track earliest candidate across each layer from processed_steps:
             earliest_pattern_match: Optional[Dict[str, Any]] = None
             earliest_pattern_step_idx: Optional[int] = None
 
@@ -1170,11 +1220,9 @@ class GuardInterface:
             earliest_refl_step_idx: Optional[int] = None
 
             all_flags: List[Dict[str, Any]] = []
-            history: List[Dict[str, Any]] = []
 
-            for step in steps:
-                step_result = self.on_step(step, history, metadata=metadata)
-                s_idx = step.get("step_index", len(history))
+            for idx, (step, step_result) in enumerate(processed_steps):
+                s_idx = step.get("step_index", idx)
 
                 # 1. Pattern Matcher / Structural Detection
                 if step_result.get("match_details"):
@@ -1197,8 +1245,6 @@ class GuardInterface:
                     if earliest_refl_result is None:
                         earliest_refl_step_idx = refl_info.get("step_index", s_idx)
                         earliest_refl_result = refl_info
-
-                history.append(step)
 
             result["flags_summary"] = all_flags
 
@@ -1250,5 +1296,7 @@ class GuardInterface:
                 "on_run_end error — failing open, run_id=%s",
                 (metadata or {}).get("run_id", "?"),
             )
+        finally:
+            self._live_steps_recorded = []
 
         return result

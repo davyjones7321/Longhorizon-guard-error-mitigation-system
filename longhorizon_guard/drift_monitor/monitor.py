@@ -58,9 +58,11 @@ class DriftMonitor:
 
     def __init__(
         self,
+        drift_threshold: float = 0.35,
         min_steps_for_progress_check: int = 8,
         min_stalled_threshold: int = 2,
     ) -> None:
+        self.drift_threshold = float(drift_threshold)
         self._min_steps_progress = min_steps_for_progress_check
         self._min_stalled_threshold = min_stalled_threshold
         self._pattern_flag_count: int = 0
@@ -141,7 +143,9 @@ class DriftMonitor:
             # Calculate score and severity
             raw_score = sum(SIGNAL_WEIGHTS.get(sig, 0.25) for sig in triggered_signals)
             severity_score = min(1.0, round(raw_score, 3))
-            drift_detected = severity_score >= 0.35 or len(triggered_signals) > 0
+            # FIX F-09: drift_detected requires severity_score >= drift_threshold (default 0.35).
+            # Removed redundant 'or len(triggered_signals) > 0' clause which made severity_score dead code.
+            drift_detected = severity_score >= self.drift_threshold
             severity_level = _calculate_severity_level(severity_score if drift_detected else 0.0)
 
             assessment = DriftAssessment(

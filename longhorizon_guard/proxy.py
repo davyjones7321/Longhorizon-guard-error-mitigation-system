@@ -2,13 +2,16 @@
 
 Transparently proxies chat completion requests between coding assistants
 (OpenCode, Claude Code, Cursor, Aider, Codex) and upstream LLM providers,
-intercepting tool calls and evaluating trajectories in real time.
+intercepting tool calls and evaluating trajectories in real time, with
+automatic session logging to disk.
 """
 
 import argparse
+import datetime
 import http.server
 import json
 import logging
+import os
 import sys
 import threading
 import urllib.error
@@ -16,8 +19,10 @@ import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from longhorizon_guard.interface import GuardInterface
+from longhorizon_guard.storage.adapters.antigravity_session import sanitize_data
 
 logger = logging.getLogger("longhorizon_guard.proxy")
+DEFAULT_LOG_DIR = os.path.join("findings", "proxy_sessions")
 
 
 def _parse_args(args_val: Any) -> Dict[str, Any]:
@@ -36,18 +41,48 @@ def _parse_args(args_val: Any) -> Dict[str, Any]:
 
 
 class SessionState:
-    """Tracks trajectory state for an active agent session."""
+    """Tracks trajectory state and logs records to disk for an active agent session."""
 
-    def __init__(self, session_id: str, guard: GuardInterface, on_flag: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        guard: GuardInterface,
+        on_flag: Optional[Callable[[Dict[str, Any]], None]] = None,
+        log_dir: Optional[str] = None,
+    ) -> None:
         self.session_id = session_id
         self.guard = guard
         self.on_flag = on_flag
+        self.log_dir = log_dir
         self.history: List[Dict[str, Any]] = []
         self._pending_tool_calls: Dict[str, Dict[str, Any]] = {}
         self._processed_tool_ids: Set[str] = set()
         self._step_counter: int = 0
         self._plan_proposed_called: bool = False
         self._task_description: str = ""
+
+        # Set up log file
+        self.log_file_path: Optional[str] = None
+        if self.log_dir:
+            try:
+                os.makedirs(self.log_dir, exist_ok=True)
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"session_{timestamp}_{self.session_id}.jsonl"
+                self.log_file_path = os.path.join(self.log_dir, filename)
+                print(f"📝 [GUARD LOG] Recording session to: {self.log_file_path}", file=sys.stderr, flush=True)
+            except Exception as exc:
+                logger.warning("Could not initialize session log file: %s", exc)
+
+    def _write_log_entry(self, entry: Dict[str, Any]) -> None:
+        """Sanitize and append an entry to the session JSONL file."""
+        if not self.log_file_path:
+            return
+        try:
+            cleaned_entry = sanitize_data(entry)
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(cleaned_entry) + "\n")
+        except Exception as exc:
+            logger.warning("Failed to write to session log file %s: %s", self.log_file_path, exc)
 
     def process_messages_before_call(self, messages: List[Dict[str, Any]]) -> None:
         """Inspect request messages for initial plan and prior tool execution outputs."""
@@ -68,12 +103,24 @@ class SessionState:
 
             if task_desc:
                 self._task_description = task_desc
-                self.guard.on_plan_proposed(
+                plan_res = self.guard.on_plan_proposed(
                     task_description=task_desc,
                     proposed_plan=plan_text,
                     metadata={"source": "guard_proxy", "session_id": self.session_id},
                 )
                 self._plan_proposed_called = True
+
+                self._write_log_entry({
+                    "type": "plan",
+                    "session_id": self.session_id,
+                    "task_description": task_desc,
+                    "proposed_plan": plan_text,
+                    "approved": plan_res.get("approved", True),
+                    "flags": plan_res.get("flags", []),
+                    "suggestions": plan_res.get("suggestions", []),
+                    "n_subgoals": plan_res.get("n_subgoals_parsed", 0),
+                    "timestamp": datetime.datetime.now().isoformat(),
+                })
 
         # 2. Correlate tool responses from previous agent action
         for msg in messages:
@@ -111,6 +158,25 @@ class SessionState:
                 self.history.append(step_record)
                 self._processed_tool_ids.add(str(tool_call_id))
                 self._step_counter += 1
+
+                # Record step to disk
+                self._write_log_entry({
+                    "type": "step",
+                    "session_id": self.session_id,
+                    "step_index": step_record["step_index"],
+                    "reasoning": step_record["reasoning"],
+                    "action_name": step_record["action_name"],
+                    "action_args": step_record["action_args"],
+                    "tool_response": step_record["tool_response"],
+                    "flagged": step_res.get("flagged", False),
+                    "warning": step_res.get("warning"),
+                    "category": step_res.get("category"),
+                    "confidence": step_res.get("confidence"),
+                    "subgoal_status": step_res.get("subgoal_status"),
+                    "drift": step_res.get("drift_assessment"),
+                    "reflector": step_res.get("reflection_result"),
+                    "timestamp": datetime.datetime.now().isoformat(),
+                })
 
                 if step_res.get("flagged"):
                     if self.on_flag:
@@ -152,6 +218,25 @@ class SessionState:
                     "args": parsed_args,
                 }
 
+    def finalize_session(self) -> Dict[str, Any]:
+        """Finalize the session, execute on_run_end, and log summary to disk."""
+        summary = self.guard.on_run_end(
+            metadata={"session_id": self.session_id, "task": self._task_description},
+            trajectory={"steps": self.history},
+        )
+        self._write_log_entry({
+            "type": "summary",
+            "session_id": self.session_id,
+            "total_steps": len(self.history),
+            "root_cause_source": summary.get("root_cause_source"),
+            "root_cause_error_type": summary.get("root_cause_error_type"),
+            "root_cause_step_index": summary.get("root_cause_step_index"),
+            "subgoals_summary": summary.get("subgoals_summary"),
+            "drift_summary": summary.get("drift_summary"),
+            "timestamp": datetime.datetime.now().isoformat(),
+        })
+        return summary
+
 
 class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
     """HTTP Request Handler that routes requests to upstream and inspects agent trajectories."""
@@ -160,6 +245,7 @@ class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
     guard: Optional[GuardInterface] = None
     on_flag: Optional[Callable[[Dict[str, Any]], None]] = None
     fail_open: bool = True
+    log_dir: Optional[str] = DEFAULT_LOG_DIR
     sessions: Dict[str, SessionState] = {}
     _lock: threading.Lock = threading.Lock()
 
@@ -173,7 +259,12 @@ class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
         with self._lock:
             if session_id not in self.sessions:
                 g = self.guard if self.guard is not None else GuardInterface()
-                self.sessions[session_id] = SessionState(session_id=session_id, guard=g, on_flag=self.on_flag)
+                self.sessions[session_id] = SessionState(
+                    session_id=session_id,
+                    guard=g,
+                    on_flag=self.on_flag,
+                    log_dir=self.log_dir,
+                )
             return self.sessions[session_id]
 
     def do_GET(self) -> None:
@@ -197,7 +288,6 @@ class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         is_chat = path.endswith("/chat/completions")
 
-        parsed_json: Optional[Dict[str, Any]] = None
         session = self._get_session()
 
         if is_chat and req_body:
@@ -289,6 +379,7 @@ def run_proxy(
     guard: Optional[GuardInterface] = None,
     on_flag: Optional[Callable[[Dict[str, Any]], None]] = None,
     fail_open: bool = True,
+    log_dir: Optional[str] = DEFAULT_LOG_DIR,
 ) -> http.server.ThreadingHTTPServer:
     """Launch the LongHorizon Guard HTTP API proxy server.
 
@@ -299,6 +390,7 @@ def run_proxy(
         guard: Optional GuardInterface instance.
         on_flag: Optional callback function triggered on detected error flags.
         fail_open: Whether to allow requests through if internal guard analysis fails.
+        log_dir: Directory where session JSONL files are stored (default 'findings/proxy_sessions').
 
     Returns:
         The running ThreadingHTTPServer instance.
@@ -307,6 +399,7 @@ def run_proxy(
     GuardProxyHandler.guard = guard if guard is not None else GuardInterface()
     GuardProxyHandler.on_flag = on_flag
     GuardProxyHandler.fail_open = fail_open
+    GuardProxyHandler.log_dir = log_dir
 
     server = http.server.ThreadingHTTPServer((host, port), GuardProxyHandler)
     return server
@@ -327,6 +420,12 @@ def main() -> None:
         help="Target upstream LLM endpoint (default: https://api.openai.com/v1)",
     )
     parser.add_argument(
+        "--log-dir",
+        "-l",
+        default=DEFAULT_LOG_DIR,
+        help=f"Directory to save session JSONL logs (default: {DEFAULT_LOG_DIR})",
+    )
+    parser.add_argument(
         "--no-fail-open",
         action="store_true",
         help="Raise internal guard exceptions instead of failing open",
@@ -334,14 +433,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 65)
     print(f"🛡️  LongHorizon Guard Real-Time API Proxy Running")
     print(f"   Listening on: http://{args.host}:{args.port}")
     print(f"   Upstream LLM: {args.upstream}")
+    print(f"   Log Directory: {args.log_dir}")
     print(f"   Fail-Open:    {not args.no_fail_open}")
-    print("=" * 60)
+    print("=" * 65)
     print(f"\nTo monitor OpenCode, Cursor, Aider, or Claude Code, configure:")
     print(f"   export OPENAI_BASE_URL=\"http://{args.host}:{args.port}/v1\"")
+    print(f"\nSession transcripts will be saved automatically to:\n   {os.path.abspath(args.log_dir)}")
     print("\nWaiting for agent requests... (Press Ctrl+C to stop)\n")
 
     server = run_proxy(
@@ -349,6 +450,7 @@ def main() -> None:
         port=args.port,
         upstream=args.upstream,
         fail_open=not args.no_fail_open,
+        log_dir=args.log_dir,
     )
 
     try:

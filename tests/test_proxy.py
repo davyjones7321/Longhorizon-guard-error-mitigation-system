@@ -2,6 +2,7 @@
 
 import http.server
 import json
+import os
 import threading
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -259,3 +260,49 @@ def test_proxy_fail_open_guarantee(mock_upstream_server):
             assert "choices" in data
     finally:
         server.shutdown()
+
+
+def test_proxy_session_logging_to_disk(tmp_path):
+    """Verify that proxy automatically writes sanitized session JSONL records to disk."""
+    log_dir = tmp_path / "test_logs"
+    guard = GuardInterface()
+    session = SessionState(
+        session_id="log_disk_test",
+        guard=guard,
+        log_dir=str(log_dir),
+    )
+
+    # 1. Process plan with credential in user prompt
+    session.process_messages_before_call([
+        {"role": "user", "content": "Deploy app with api_key='sk-proj-123456789012345678901234567890'"}
+    ])
+
+    # 2. Process step
+    session._pending_tool_calls["tc_1"] = {
+        "reasoning": "checking files",
+        "name": "ls",
+        "args": {"path": "."},
+    }
+    session.process_messages_before_call([
+        {"role": "tool", "tool_call_id": "tc_1", "name": "ls", "content": "file1.py"}
+    ])
+
+    # 3. Finalize session
+    summary = session.finalize_session()
+    assert summary is not None
+
+    # Verify log file was written
+    assert session.log_file_path is not None
+    assert os.path.exists(session.log_file_path)
+
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        lines = [json.loads(line) for line in f if line.strip()]
+
+    assert len(lines) == 3
+    assert lines[0]["type"] == "plan"
+    assert lines[1]["type"] == "step"
+    assert lines[2]["type"] == "summary"
+
+    # Verify credential redaction
+    assert "sk-proj-123456789012345678901234567890" not in open(session.log_file_path).read()
+    assert "***REDACTED***" in lines[0]["task_description"]

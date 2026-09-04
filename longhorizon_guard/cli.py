@@ -32,6 +32,12 @@ def main():
         help="Target upstream LLM provider URL (default: https://api.openai.com/v1)",
     )
     proxy_parser.add_argument(
+        "--log-dir",
+        "-l",
+        default="findings/proxy_sessions",
+        help="Directory to save session JSONL logs (default: findings/proxy_sessions)",
+    )
+    proxy_parser.add_argument(
         "--no-fail-open",
         action="store_true",
         help="Raise guard errors instead of failing open",
@@ -67,14 +73,16 @@ def main():
     elif args.command == "proxy":
         from longhorizon_guard.proxy import run_proxy
 
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 65)
         print(f"🛡️  LongHorizon Guard Real-Time API Proxy Running")
         print(f"   Listening on: http://{args.host}:{args.port}")
         print(f"   Upstream LLM: {args.upstream}")
+        print(f"   Log Directory: {args.log_dir}")
         print(f"   Fail-Open:    {not args.no_fail_open}")
-        print("=" * 60)
+        print("=" * 65)
         print(f"\nTo monitor OpenCode, Cursor, Aider, or Claude Code, configure:")
         print(f"   export OPENAI_BASE_URL=\"http://{args.host}:{args.port}/v1\"")
+        print(f"\nSession transcripts will be saved automatically to:\n   {args.log_dir}")
         print("\nWaiting for agent requests... (Press Ctrl+C to stop)\n")
 
         server = run_proxy(
@@ -82,6 +90,7 @@ def main():
             port=args.port,
             upstream=args.upstream,
             fail_open=not args.no_fail_open,
+            log_dir=args.log_dir,
         )
         try:
             server.serve_forever()

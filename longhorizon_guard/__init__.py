@@ -11,6 +11,7 @@ from longhorizon_guard.drift_monitor.monitor import DriftMonitor
 from longhorizon_guard.reflector.reflector import PlanReflector
 from longhorizon_guard.integrations.client_wrapper import wrap_guard
 from longhorizon_guard.integrations.langchain_callback import LongHorizonGuardCallback
+from longhorizon_guard.proxy import run_proxy
 
 __all__ = [
     "__version__",
@@ -21,4 +22,5 @@ __all__ = [
     "PlanReflector",
     "wrap_guard",
     "LongHorizonGuardCallback",
+    "run_proxy",
 ]

@@ -114,6 +114,22 @@ Evaluate a JSON trajectory file:
 longhorizon-guard evaluate --trajectory path/to/trajectory.json
 ```
 
+Run the real-time API proxy to monitor coding assistants (OpenCode, Cursor, Aider, Claude Code):
+```bash
+longhorizon-guard proxy --port 8000 --upstream https://api.openai.com/v1
+```
+
+Once running, configure your coding assistant's API base URL once:
+- **OpenCode / Codex / Aider / Cursor**: Set environment variable:
+  ```bash
+  export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
+  ```
+- **Claude Code**: Set environment variable:
+  ```bash
+  export ANTHROPIC_BASE_URL="http://127.0.0.1:8000/v1"
+  ```
+The proxy intercepts all tool calls, reasoning steps, and plans transparently in the background, printing real-time warnings if the assistant enters an infinite loop, repeats failed commands, or drifts from its subgoals.
+
 ### 2. Python API Integration
 
 Incorporate `GuardInterface` into an agent execution loop:

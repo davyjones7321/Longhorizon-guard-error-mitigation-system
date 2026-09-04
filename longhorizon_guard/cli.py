@@ -21,6 +21,22 @@ def main():
     # Command: info
     info_parser = subparsers.add_parser("info", help="Show Guard library status and loaded pattern counts")
 
+    # Command: proxy
+    proxy_parser = subparsers.add_parser("proxy", help="Run HTTP API proxy to monitor coding assistants in real time")
+    proxy_parser.add_argument("--host", "-H", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
+    proxy_parser.add_argument("--port", "-p", type=int, default=8000, help="Port (default: 8000)")
+    proxy_parser.add_argument(
+        "--upstream",
+        "-u",
+        default="https://api.openai.com/v1",
+        help="Target upstream LLM provider URL (default: https://api.openai.com/v1)",
+    )
+    proxy_parser.add_argument(
+        "--no-fail-open",
+        action="store_true",
+        help="Raise guard errors instead of failing open",
+    )
+
     args = parser.parse_args()
 
     if args.command == "evaluate":
@@ -47,6 +63,31 @@ def main():
         summary = guard.on_run_end(metadata={"task": task_desc}, trajectory={"steps": steps})
         print("\n=== LONGHORIZON GUARD EVALUATION SUMMARY ===")
         print(json.dumps(summary, indent=2))
+
+    elif args.command == "proxy":
+        from longhorizon_guard.proxy import run_proxy
+
+        print("\n" + "=" * 60)
+        print(f"🛡️  LongHorizon Guard Real-Time API Proxy Running")
+        print(f"   Listening on: http://{args.host}:{args.port}")
+        print(f"   Upstream LLM: {args.upstream}")
+        print(f"   Fail-Open:    {not args.no_fail_open}")
+        print("=" * 60)
+        print(f"\nTo monitor OpenCode, Cursor, Aider, or Claude Code, configure:")
+        print(f"   export OPENAI_BASE_URL=\"http://{args.host}:{args.port}/v1\"")
+        print("\nWaiting for agent requests... (Press Ctrl+C to stop)\n")
+
+        server = run_proxy(
+            host=args.host,
+            port=args.port,
+            upstream=args.upstream,
+            fail_open=not args.no_fail_open,
+        )
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopping LongHorizon Guard proxy...")
+            server.shutdown()
 
     elif args.command == "info" or not args.command:
         guard = GuardInterface()

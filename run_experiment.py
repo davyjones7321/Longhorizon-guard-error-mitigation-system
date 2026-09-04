@@ -44,17 +44,27 @@ if str(EVAL_DIR) not in sys.path:
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from agent_scaffold.tools import ToolRegistry, default_tools
-from evalharness.adapter import create_scaffold_adapter
-from evalharness.llm import (
-    create_anthropic_llm_call,
-    create_gemini_llm_call,
-    create_openrouter_llm_call,
-    validate_api_key,
-)
-from evalharness.logger import save_metadata, save_trajectory
-from evalharness.runner import load_tasks, run_task
-from evalharness.schema import FinalStatus, RunMetadata, Task, Trajectory
+try:
+    from agent_scaffold.tools import ToolRegistry, default_tools
+    from evalharness.adapter import create_scaffold_adapter
+    from evalharness.llm import (
+        create_anthropic_llm_call,
+        create_gemini_llm_call,
+        create_openrouter_llm_call,
+        validate_api_key,
+    )
+    from evalharness.logger import save_metadata, save_trajectory
+    from evalharness.runner import load_tasks, run_task
+    from evalharness.schema import FinalStatus, RunMetadata, Task, Trajectory
+except ImportError as exc:
+    print("\n[NOTE] 'run_experiment.py' is an internal batch benchmark runner.", file=sys.stderr)
+    print("To test LongHorizon Guard with zero external dependencies, run:", file=sys.stderr)
+    print("    python run_smoke_test.py", file=sys.stderr)
+    print("To monitor your own agent harness in real time, run:", file=sys.stderr)
+    print("    longhorizon-guard proxy --port 8000", file=sys.stderr)
+    print("To evaluate any custom trajectory from your own harness, run:", file=sys.stderr)
+    print("    python run_smoke_test.py --trajectory path/to/your_run.json\n", file=sys.stderr)
+    sys.exit(1)
 
 
 def resolve_provider_llm_call(

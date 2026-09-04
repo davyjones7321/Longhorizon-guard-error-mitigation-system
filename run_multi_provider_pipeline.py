@@ -332,12 +332,12 @@ def main():
     print("Sequential Multi-Provider Judge Pipeline")
     print("=" * 70)
 
-    providers_dir = ROOT_DIR / "findings" / "providers"
-    providers_dir.mkdir(parents=True, exist_ok=True)
-
     sorted_file = ROOT_DIR / "sorted.json"
     if not sorted_file.exists():
-        print(f"ERROR: {sorted_file} does not exist!", file=sys.stderr)
+        sorted_file = ROOT_DIR / "findings" / "agenterrorbench_converted.json"
+    if not sorted_file.exists():
+        print(f"Note: run_multi_provider_pipeline.py requires trajectory data (sorted.json or findings/agenterrorbench_converted.json).", file=sys.stderr)
+        print("To evaluate your own trajectories, use: longhorizon-guard evaluate -t <path_to_json>", file=sys.stderr)
         sys.exit(1)
 
     with open(sorted_file, "r", encoding="utf-8") as f:

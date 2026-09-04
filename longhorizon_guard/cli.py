@@ -43,6 +43,15 @@ def main():
         help="Raise guard errors instead of failing open",
     )
 
+    # Command: hook
+    hook_parser = subparsers.add_parser("hook", help="Execute lifecycle hook for WorkBuddy / CodeBuddy")
+    hook_parser.add_argument(
+        "--log-dir",
+        "-l",
+        default="findings/hook_sessions",
+        help="Directory to save session JSONL logs (default: findings/hook_sessions)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "evaluate":
@@ -97,6 +106,10 @@ def main():
         except KeyboardInterrupt:
             print("\nStopping LongHorizon Guard proxy...")
             server.shutdown()
+
+    elif args.command == "hook":
+        from longhorizon_guard.hook import main as hook_main
+        hook_main()
 
     elif args.command == "info" or not args.command:
         guard = GuardInterface()

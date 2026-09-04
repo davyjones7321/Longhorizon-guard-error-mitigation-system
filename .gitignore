@@ -51,10 +51,25 @@ coverage.xml
 logs/
 
 # =========================================================================
-# Local Test Rigs & Mock Harnesses (Not Shipped)
+# Local Test Rigs, Legacy Runners & Mock Harnesses (Not Shipped)
 # =========================================================================
 harness/
 eval/
+scripts/
+run_smoke_test.py
+run_experiment.py
+run_multi_provider_pipeline.py
+
+# =========================================================================
+# WorkBuddy AI Local Hooks & Launcher Scripts (Local Only)
+# =========================================================================
+.codebuddy/
+longhorizon_guard/hook.py
+tests/test_hook.py
+findings/hook_sessions/
+findings/proxy_sessions/
+run_gemini_proxy.bat
+run_gemini_proxy.ps1
 
 # =========================================================================
 # Findings Data Directory Rules

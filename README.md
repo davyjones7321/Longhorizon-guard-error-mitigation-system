@@ -355,20 +355,9 @@ However, **it cannot detect arbitrary semantic or logical constraint violations 
 
 ---
 
-## Running Verification Tests
+## Verification
 
-Run the full pytest suite:
+Run the test suite:
 ```bash
 pytest tests/ -v
 ```
-
-> **Note on E2E Smoke Tests**: The end-to-end smoke tests in `tests/test_smoke_e2e.py` run against a dedicated, bundled fixture (`tests/fixtures/e2e_smoke_trajectories.json`) containing real trajectories with zero external network or dataset dependencies. Full 77.6MB benchmark training datasets remain optional for local re-mining.
-
----
-
-## Dataset Resources
-
-- **AgentErrorBench Benchmark Dataset**: [GitHub Repository](https://github.com/THUDM/AgentErrorBench) | [HuggingFace Dataset](https://huggingface.co/datasets/THUDM/AgentErrorBench)
-- **ALFWORLD Environment**: [ALFWORLD GitHub](https://github.com/alfworld/alfworld)
-- **WebShop Environment**: [WebShop GitHub](https://github.com/princeton-nlp/webshop)
-- **GAIA Benchmark**: [GAIA Benchmark on HuggingFace](https://huggingface.co/datasets/gaia-benchmark/GAIA)

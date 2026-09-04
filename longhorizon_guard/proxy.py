@@ -8,6 +8,7 @@ automatic session logging to disk.
 
 import argparse
 import datetime
+import gzip
 import http.server
 import json
 import logging
@@ -16,6 +17,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import zlib
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from longhorizon_guard.interface import GuardInterface
@@ -38,6 +40,47 @@ def _parse_args(args_val: Any) -> Dict[str, Any]:
         except Exception:
             return {"raw": args_val}
     return {"raw": str(args_val)} if args_val is not None else {}
+
+
+def _decompress_response_body(body: bytes, content_encoding: Optional[str] = None) -> bytes:
+    """Decompress HTTP response body based on Content-Encoding or magic bytes.
+
+    Supports gzip, deflate (zlib format or raw deflate), and brotli (if installed).
+    Returns the original body if uncompressed or if decompression fails.
+    """
+    if not body:
+        return body
+
+    encoding = (content_encoding or "").lower().strip()
+
+    # 1. Gzip (Content-Encoding: gzip/x-gzip or gzip magic bytes 1f 8b)
+    if encoding in ("gzip", "x-gzip") or body.startswith(b"\x1f\x8b"):
+        try:
+            return gzip.decompress(body)
+        except Exception as exc:
+            logger.debug("Failed gzip decompression: %s", exc)
+
+    # 2. Deflate (zlib format or raw deflate)
+    if encoding == "deflate":
+        try:
+            return zlib.decompress(body)
+        except zlib.error:
+            try:
+                return zlib.decompress(body, -zlib.MAX_WBITS)
+            except Exception as exc:
+                logger.debug("Failed deflate decompression: %s", exc)
+
+    # 3. Brotli (Content-Encoding: br)
+    if encoding == "br":
+        try:
+            import brotli
+            return brotli.decompress(body)
+        except ImportError:
+            logger.debug("brotli package not installed; skipping 'br' decompression")
+        except Exception as exc:
+            logger.debug("Failed brotli decompression: %s", exc)
+
+    return body
 
 
 class SessionState:
@@ -339,8 +382,10 @@ class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
                 if is_chat and session and resp_body:
                     try:
                         content_type = resp_headers.get("Content-Type", "")
+                        content_encoding = resp_headers.get("Content-Encoding", "")
                         if "application/json" in content_type:
-                            resp_json = json.loads(resp_body.decode("utf-8"))
+                            decompressed_body = _decompress_response_body(resp_body, content_encoding)
+                            resp_json = json.loads(decompressed_body.decode("utf-8"))
                             session.process_response_after_call(resp_json)
                     except Exception as exc:
                         if not self.fail_open:

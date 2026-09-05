@@ -285,6 +285,30 @@ print(f"Root cause step: {run_summary['root_cause_step_index']}")
     1. **Calling `finalize_run()`**: An LLM client has no universal concept of when an agent's multi-step task is complete (some finish in 1 call, some loop 20 times). You must call `client.finalize_run()` when your loop terminates.
     2. **Task/Plan Heuristic**: The wrapper treats the initial user message as the task description. If your agent uses a separate formal planning phase, explicit registration via `client.guard.on_plan_proposed(...)` gives higher precision than the heuristic.
 
+#### Path C: Real-Time HTTP API Proxy (`longhorizon-guard proxy`)
+For standalone coding assistants (Aider, OpenCode, Cursor, Claude Code) where you cannot modify agent source code, the built-in HTTP API proxy transparently intercepts chat completions between the agent and upstream LLM providers (e.g. OpenAI, Groq, Ollama, DeepSeek).
+
+```bash
+# 1. Start the proxy listening on port 8000
+python -m longhorizon_guard.proxy --upstream https://api.openai.com/v1
+
+# 2. In your coding assistant terminal, redirect the base URL:
+export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
+
+# 3. Run your assistant normally
+aider
+```
+
+##### Dual Supported Observation Modes
+- **Native Function Calling (`tool_calls` mode)**:
+  Used by assistants like OpenCode, Cursor Agent, and Claude Code. The proxy captures assistant `tool_calls`, correlates them with subsequent `role: "tool"` responses, and dispatches them to `guard.on_step()`.
+- **Plain-Text File Edits (`text_edits` mode)**:
+  Used by assistants like Aider that format code edits as plain text directly in the assistant's completion content rather than function calling. The proxy parses Aider git-style SEARCH/REPLACE diff blocks, unified diffs (`udiff`), and whole-file replacements, recording each completed file modification as an individual step in the trajectory.
+- **Task Extraction Heuristic**:
+  Structurally selects the real user task from conversation messages while skipping canned system-prompt few-shot demonstration examples (e.g. "Change the greeting to be more casual").
+- **Automatic Session Logging**:
+  Sanitized session transcripts (`plan`, `step`, `summary`) are recorded to JSONL files under `findings/proxy_sessions/`. Turn completion (`finish_reason: "stop"`) or proxy shutdown automatically invokes `guard.on_run_end()` to produce the final trajectory summary.
+
 ---
 
 ## LLM-as-a-Judge Evaluation & Provider Configuration

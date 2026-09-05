@@ -11,7 +11,19 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from longhorizon_guard.interface import GuardInterface
-from longhorizon_guard.proxy import run_proxy, GuardProxyHandler, SessionState, _decompress_response_body
+from longhorizon_guard.proxy import (
+    run_proxy,
+    GuardProxyHandler,
+    GuardProxyServer,
+    SessionState,
+    _decompress_response_body,
+    _extract_filename_before,
+    _extract_candidates_from_line,
+    _is_placeholder_task,
+    _is_substantive_task,
+    _extract_task_description,
+    _parse_text_edits,
+)
 
 
 class MockUpstreamHandler(http.server.BaseHTTPRequestHandler):
@@ -435,3 +447,415 @@ def test_proxy_session_logging_to_disk(tmp_path):
     # Verify credential redaction
     assert "sk-proj-123456789012345678901234567890" not in open(session.log_file_path).read()
     assert "***REDACTED***" in lines[0]["task_description"]
+
+
+def test_proxy_plan_heuristic_avoids_few_shot_boilerplate(tmp_path):
+    """Verify that task description extraction skips Aider system few-shot examples."""
+    guard = GuardInterface()
+    session = SessionState(session_id="few_shot_test", guard=guard, log_dir=str(tmp_path))
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert developer. To edit files, output SEARCH/REPLACE blocks.",
+        },
+        {
+            "role": "user",
+            "content": "Change the greeting to be more casual.",
+        },
+        {
+            "role": "assistant",
+            "content": "greeting.py\n<<<<<<< SEARCH\nprint('hello')\n=======\nprint('hey')\n>>>>>>> REPLACE",
+        },
+        {
+            "role": "user",
+            "content": "Build a Flask CRUD API with endpoints for GET and POST /items.",
+        },
+    ]
+
+    session.process_messages_before_call(messages)
+    assert session._task_description == "Build a Flask CRUD API with endpoints for GET and POST /items."
+    assert "greeting" not in session._task_description
+
+
+def test_proxy_plain_text_diff_observation(tmp_path):
+    """Verify that proxy captures plain-text Aider SEARCH/REPLACE diffs as steps and logs summary."""
+    log_dir = tmp_path / "aider_logs"
+    guard = GuardInterface()
+    session = SessionState(session_id="aider_test", guard=guard, log_dir=str(log_dir))
+
+    # Turn 1: user task
+    session.process_messages_before_call([
+        {"role": "user", "content": "Create a Flask app with tests."}
+    ])
+
+    # Realistic Aider response containing multi-file SEARCH/REPLACE diff blocks
+    aider_response = {
+        "id": "chatcmpl-aider-1",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": (
+                    "I will create `app.py` and `tests/test_app.py`.\n\n"
+                    "app.py\n"
+                    "<<<<<<< SEARCH\n"
+                    "=======\n"
+                    "from flask import Flask, jsonify\n"
+                    "app = Flask(__name__)\n\n"
+                    "@app.route('/items')\n"
+                    "def get_items():\n"
+                    "    return jsonify([])\n"
+                    ">>>>>>> REPLACE\n\n"
+                    "tests/test_app.py\n"
+                    "<<<<<<< SEARCH\n"
+                    "=======\n"
+                    "import pytest\n"
+                    "from app import app\n\n"
+                    "def test_get_items():\n"
+                    "    client = app.test_client()\n"
+                    "    assert client.get('/items').status_code == 200\n"
+                    ">>>>>>> REPLACE\n"
+                ),
+            },
+            "finish_reason": "stop",
+        }],
+    }
+
+    # Process response
+    session.process_response_after_call(aider_response)
+
+    assert session.mode == "text_edits"
+    assert len(session.history) == 2
+    assert session.history[0]["action_name"] == "edit_file"
+    assert session.history[0]["action_args"]["path"] == "app.py"
+    assert session.history[0]["action_args"]["format"] == "diff"
+    assert session.history[1]["action_name"] == "edit_file"
+    assert session.history[1]["action_args"]["path"] == "tests/test_app.py"
+    assert session.history[1]["action_args"]["format"] == "diff"
+
+    # Verify log records: during the turn, no premature summary is written
+    assert os.path.exists(session.log_file_path)
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        records_during_turn = [json.loads(line) for line in f if line.strip()]
+
+    assert len(records_during_turn) == 3
+    assert records_during_turn[0]["type"] == "plan"
+    assert records_during_turn[1]["type"] == "step"
+    assert records_during_turn[1]["action_args"]["path"] == "app.py"
+    assert records_during_turn[2]["type"] == "step"
+    assert records_during_turn[2]["action_args"]["path"] == "tests/test_app.py"
+
+    # Explicit session finalization produces the summary record
+    session.finalize_session()
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        records_after_finalize = [json.loads(line) for line in f if line.strip()]
+
+    assert len(records_after_finalize) == 4
+    assert records_after_finalize[3]["type"] == "summary"
+    assert records_after_finalize[3]["total_steps"] == 2
+
+
+def test_proxy_plain_text_whole_file_observation(tmp_path):
+    """Verify that proxy captures plain-text whole file blocks as steps."""
+    log_dir = tmp_path / "whole_logs"
+    guard = GuardInterface()
+    session = SessionState(session_id="whole_test", guard=guard, log_dir=str(log_dir))
+
+    session.process_messages_before_call([
+        {"role": "user", "content": "Write server.py"}
+    ])
+
+    response = {
+        "id": "chatcmpl-whole-1",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": (
+                    "Here is the complete file for `server.py`:\n\n"
+                    "server.py\n"
+                    "```python\n"
+                    "import http.server\n"
+                    "print('running')\n"
+                    "```\n"
+                ),
+            },
+            "finish_reason": "stop",
+        }],
+    }
+
+    session.process_response_after_call(response)
+    assert session.mode == "text_edits"
+    assert len(session.history) == 1
+    assert session.history[0]["action_name"] == "edit_file"
+    assert session.history[0]["action_args"]["path"] == "server.py"
+    assert session.history[0]["action_args"]["format"] == "whole"
+
+
+def test_proxy_e2e_aider_flow_through_http(tmp_path):
+    """End-to-end integration test of an Aider session proxied through HTTP."""
+    class AiderMockHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            content_len = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(content_len)
+
+            resp_payload = {
+                "id": "chatcmpl-aider-e2e",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            "I will update app.py:\n\n"
+                            "app.py\n"
+                            "<<<<<<< SEARCH\n"
+                            "def old(): pass\n"
+                            "=======\n"
+                            "def new(): return True\n"
+                            ">>>>>>> REPLACE\n"
+                        ),
+                    },
+                    "finish_reason": "stop",
+                }],
+            }
+            body = json.dumps(resp_payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    upstream_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), AiderMockHandler)
+    upstream_port = upstream_server.server_port
+    t_upstream = threading.Thread(target=upstream_server.serve_forever, daemon=True)
+    t_upstream.start()
+
+    log_dir = tmp_path / "e2e_aider_logs"
+    proxy_server = run_proxy(
+        host="127.0.0.1",
+        port=0,
+        upstream=f"http://127.0.0.1:{upstream_port}/v1",
+        log_dir=str(log_dir),
+    )
+    proxy_port = proxy_server.server_port
+    t_proxy = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    t_proxy.start()
+
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
+            data=json.dumps({
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": "Diff editing format instructions."},
+                    {"role": "user", "content": "Change greeting (few shot)"},
+                    {"role": "assistant", "content": "greeting.py\n<<<<<<< SEARCH\n..."},
+                    {"role": "user", "content": "Implement new function in app.py"},
+                ],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Session-ID": "aider_http_session"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode("utf-8"))
+            assert "choices" in data
+
+        # Check session log file during turn: plan + step (no premature summary)
+        log_files = list(log_dir.glob("session_*_aider_http_session.jsonl"))
+        assert len(log_files) == 1
+        with open(log_files[0], "r", encoding="utf-8") as f:
+            entries = [json.loads(l) for l in f if l.strip()]
+
+        assert len(entries) == 2
+        assert entries[0]["type"] == "plan"
+        assert entries[0]["task_description"] == "Implement new function in app.py"
+        assert entries[1]["type"] == "step"
+        assert entries[1]["action_args"]["path"] == "app.py"
+
+        # Explicitly finalize via HTTP endpoint
+        finalize_req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy_port}/v1/session/finalize",
+            headers={"X-Session-ID": "aider_http_session"},
+            data=b"",
+            method="POST",
+        )
+        with urllib.request.urlopen(finalize_req) as fin_resp:
+            assert fin_resp.status == 200
+            fin_data = json.loads(fin_resp.read().decode("utf-8"))
+            assert fin_data.get("status") == "finalized"
+
+        with open(log_files[0], "r", encoding="utf-8") as f:
+            final_entries = [json.loads(l) for l in f if l.strip()]
+
+        assert len(final_entries) == 3
+        assert final_entries[2]["type"] == "summary"
+        assert final_entries[2]["total_steps"] == 1
+    finally:
+        proxy_server.shutdown()
+        upstream_server.shutdown()
+
+
+def test_gap1_sentence_embedded_filename_extraction():
+    """Gap 1 Regression: Verify filename extraction succeeds when the filename is embedded mid-sentence.
+
+    Previously, scanning only candidate words or anchoring with $ at the end of the line caused:
+    'Let's go ahead and modify the file app.py to fix this issue:' to return unknown_file.
+    """
+    # 1. Filename embedded mid-sentence before trailing prose
+    text1 = "Let's go ahead and modify the file app.py to fix this issue:"
+    candidates1 = _extract_candidates_from_line(text1)
+    assert any(c[0] == "app.py" for c in candidates1)
+    extracted1 = _extract_filename_before(text1 + "\n<<<<<<< SEARCH", len(text1) + 1)
+    assert extracted1 == "app.py"
+
+    # 2. Delimiter preference: colon/end-of-line candidate preferred over mid-sentence candidate
+    text2 = "Compare old_version.py with new_version.py:"
+    extracted2 = _extract_filename_before(text2 + "\n<<<<<<< SEARCH", len(text2) + 1)
+    assert extracted2 == "new_version.py"
+
+    # 3. Backtick-wrapped path
+    text3 = "Here is the diff for `src/models/user.py` to add validation."
+    extracted3 = _extract_filename_before(text3 + "\n<<<<<<< SEARCH", len(text3) + 1)
+    assert extracted3 == "src/models/user.py"
+
+    # 4. Ignore false positives: Python version 3.10, e.g., i.e.
+    text4 = "Using Python 3.10 (e.g. standard library), modify `config.py`:"
+    extracted4 = _extract_filename_before(text4 + "\n<<<<<<< SEARCH", len(text4) + 1)
+    assert extracted4 == "config.py"
+
+    # 5. Full parse_text_edits test with embedded sentence
+    block = (
+        "Let's go ahead and modify the file app.py to fix this issue:\n"
+        "<<<<<<< SEARCH\n"
+        "def run(): return False\n"
+        "=======\n"
+        "def run(): return True\n"
+        ">>>>>>> REPLACE"
+    )
+    edits = _parse_text_edits(block)
+    assert len(edits) == 1
+    assert edits[0]["path"] == "app.py"
+    assert edits[0]["format"] == "diff"
+
+
+def test_gap2_placeholder_handshake_delatching(tmp_path):
+    """Gap 2 Regression: Verify session updates task description when upgrading from placeholder handshake.
+
+    Previously, _plan_proposed_called latched permanently True on Request 1 containing
+    Aider's placeholder 'I am not sharing any files that you can edit yet.', ignoring the
+    substantive task that arrived in Request 2.
+    """
+    log_dir = tmp_path / "gap2_logs"
+    guard = GuardInterface()
+    session = SessionState(session_id="gap2_session", guard=guard, log_dir=str(log_dir))
+
+    # Turn 1: Aider handshake without files
+    handshake_messages = [
+        {"role": "user", "content": "I am not sharing any files that you can edit yet."}
+    ]
+    assert _is_placeholder_task("I am not sharing any files that you can edit yet.") is True
+    session.process_messages_before_call(handshake_messages)
+
+    # Handshake did not lock in substantive plan proposed
+    assert session._plan_proposed_called is False
+    assert session._task_description == "I am not sharing any files that you can edit yet."
+
+    # Turn 2: Substantive task arrives
+    real_task = "Build a Flask CRUD API with endpoints for GET and POST /items."
+    turn2_messages = [
+        {"role": "user", "content": "I am not sharing any files that you can edit yet."},
+        {"role": "assistant", "content": "Understood. Please let me know what you'd like me to work on."},
+        {"role": "user", "content": real_task},
+    ]
+    session.process_messages_before_call(turn2_messages)
+
+    # The plan should have updated to the real task
+    assert session._plan_proposed_called is True
+    assert session._task_description == real_task
+
+    # Check JSONL log file: verify plan entry records the substantive task
+    assert session.log_file_path is not None
+    assert os.path.exists(session.log_file_path)
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+
+    plan_records = [r for r in records if r["type"] == "plan"]
+    assert len(plan_records) == 2
+    assert plan_records[1]["task_description"] == real_task
+
+
+def test_gap3_multi_turn_does_not_finalize_per_turn(tmp_path):
+    """Gap 3 Regression: Verify multi-turn sessions do not write premature summary records per turn.
+
+    Previously, finish_reason == 'stop' triggered finalize_session() and on_run_end() after
+    every turn, polluting the transcript with premature intermediate summary entries.
+    """
+    log_dir = tmp_path / "gap3_logs"
+    guard = GuardInterface()
+    session = SessionState(session_id="gap3_session", guard=guard, log_dir=str(log_dir), idle_timeout=0.0)
+
+    session.process_messages_before_call([
+        {"role": "user", "content": "Implement user service"}
+    ])
+
+    # Turn 1
+    resp1 = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "user.py\n<<<<<<< SEARCH\npass\n=======\nclass User: pass\n>>>>>>> REPLACE",
+            },
+            "finish_reason": "stop",
+        }]
+    }
+    session.process_response_after_call(resp1)
+
+    # Verify no summary written after Turn 1
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        turn1_entries = [json.loads(l) for l in f if l.strip()]
+    assert len(turn1_entries) == 2  # 1 plan + 1 step
+    assert not any(e["type"] == "summary" for e in turn1_entries)
+
+    # Turn 2
+    resp2 = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "test_user.py\n<<<<<<< SEARCH\npass\n=======\ndef test_user(): pass\n>>>>>>> REPLACE",
+            },
+            "finish_reason": "stop",
+        }]
+    }
+    session.process_response_after_call(resp2)
+
+    # Verify no summary written after Turn 2
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        turn2_entries = [json.loads(l) for l in f if l.strip()]
+    assert len(turn2_entries) == 3  # 1 plan + 2 steps
+    assert not any(e["type"] == "summary" for e in turn2_entries)
+
+    # Now finalize explicitly (e.g. on shutdown, idle timeout, or explicit API call)
+    summary = session.finalize_session()
+    assert summary is not None
+
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        final_entries = [json.loads(l) for l in f if l.strip()]
+
+    assert len(final_entries) == 4  # 1 plan + 2 steps + 1 summary
+    summary_entries = [e for e in final_entries if e["type"] == "summary"]
+    assert len(summary_entries) == 1
+    assert summary_entries[0]["total_steps"] == 2
+
+    # Verify idempotent finalize (does not write duplicate summary entries)
+    session.finalize_session()
+    with open(session.log_file_path, "r", encoding="utf-8") as f:
+        re_entries = [json.loads(l) for l in f if l.strip()]
+    assert len(re_entries) == 4
+

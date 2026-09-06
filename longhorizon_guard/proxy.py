@@ -16,6 +16,7 @@ Supported Observation Modes:
 
 import argparse
 import atexit
+import codecs
 import datetime
 import gzip
 import http.server
@@ -91,6 +92,149 @@ def _decompress_response_body(body: bytes, content_encoding: Optional[str] = Non
             logger.debug("Failed brotli decompression: %s", exc)
 
     return body
+
+
+class SSEAccumulator:
+    """Accumulates Server-Sent Events (SSE) chat completion chunks into a standard response object."""
+
+    def __init__(self, encoding: str = "utf-8") -> None:
+        self.resp_id: str = ""
+        self.model: str = ""
+        self.created: int = 0
+        self.finish_reason: Optional[str] = None
+        self._content_parts: List[str] = []
+        self._reasoning_parts: List[str] = []
+        self._tool_calls: Dict[int, Dict[str, Any]] = {}
+        self._buffer: str = ""
+        self._encoding = encoding
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+
+    def feed_bytes(self, chunk: bytes) -> None:
+        """Feed raw bytes into the SSE parser buffer, preserving multi-byte UTF-8 sequences."""
+        if not chunk:
+            return
+        text = self._decoder.decode(chunk, final=False)
+        if text:
+            self._buffer += text
+            self._process_buffer()
+
+    def _process_buffer(self) -> None:
+        """Process complete lines in the buffer."""
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            line = line.strip("\r")
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    continue
+                try:
+                    chunk_json = json.loads(payload)
+                    self._process_chunk(chunk_json)
+                except Exception:
+                    pass
+
+    def _process_chunk(self, chunk: Dict[str, Any]) -> None:
+        """Extract incremental delta from a parsed chunk."""
+        if not self.resp_id and chunk.get("id"):
+            self.resp_id = chunk["id"]
+        if not self.model and chunk.get("model"):
+            self.model = chunk["model"]
+        if not self.created and chunk.get("created"):
+            self.created = chunk["created"]
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            return
+
+        choice = choices[0]
+        f_reason = choice.get("finish_reason")
+        if f_reason:
+            self.finish_reason = f_reason
+
+        delta = choice.get("delta", {})
+        content = delta.get("content")
+        if content:
+            self._content_parts.append(content)
+
+        reasoning = delta.get("reasoning_content") or delta.get("thought")
+        if reasoning:
+            self._reasoning_parts.append(reasoning)
+
+        tool_calls = delta.get("tool_calls", [])
+        for tc in tool_calls:
+            idx = tc.get("index", 0)
+            if idx not in self._tool_calls:
+                self._tool_calls[idx] = {
+                    "id": tc.get("id") or "",
+                    "type": tc.get("type") or "function",
+                    "name": "",
+                    "arguments": [],
+                }
+            entry = self._tool_calls[idx]
+            if tc.get("id"):
+                entry["id"] = tc["id"]
+            if tc.get("type"):
+                entry["type"] = tc["type"]
+            func = tc.get("function", {})
+            if func.get("name"):
+                entry["name"] += func["name"]
+            if "arguments" in func and func["arguments"] is not None:
+                entry["arguments"].append(func["arguments"])
+
+    def finalize(self) -> Dict[str, Any]:
+        """Flush remaining buffer and return full reconstructed chat completion dictionary."""
+        # Flush any trailing bytes buffered in the incremental decoder
+        trailing_text = self._decoder.decode(b"", final=True)
+        if trailing_text:
+            self._buffer += trailing_text
+            self._process_buffer()
+
+        if self._buffer.strip():
+            line = self._buffer.strip()
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload != "[DONE]":
+                    try:
+                        self._process_chunk(json.loads(payload))
+                    except Exception:
+                        pass
+            self._buffer = ""
+
+        final_tool_calls = []
+        if self._tool_calls:
+            for idx in sorted(self._tool_calls.keys()):
+                tc = self._tool_calls[idx]
+                final_tool_calls.append({
+                    "id": tc["id"] or f"call_{idx}",
+                    "type": tc["type"],
+                    "function": {
+                        "name": tc["name"] or "tool",
+                        "arguments": "".join(tc["arguments"]),
+                    },
+                })
+
+        message: Dict[str, Any] = {
+            "role": "assistant",
+            "content": "".join(self._content_parts),
+        }
+        if self._reasoning_parts:
+            message["reasoning_content"] = "".join(self._reasoning_parts)
+        if final_tool_calls:
+            message["tool_calls"] = final_tool_calls
+
+        return {
+            "id": self.resp_id or "chatcmpl-reconstructed",
+            "object": "chat.completion",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": self.finish_reason or "stop",
+            }],
+        }
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -695,6 +839,7 @@ class SessionState:
 class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
     """HTTP Request Handler that routes requests to upstream and inspects agent trajectories."""
 
+    protocol_version: str = "HTTP/1.1"
     upstream_base_url: str = "https://api.openai.com/v1"
     guard: Optional[GuardInterface] = None
     on_flag: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -799,13 +944,88 @@ class GuardProxyHandler(http.server.BaseHTTPRequestHandler):
             with urllib.request.urlopen(req) as resp:
                 resp_status = resp.status
                 resp_headers = resp.headers
+                content_type = resp_headers.get("Content-Type", "")
+                transfer_encoding = resp_headers.get("Transfer-Encoding", "").lower()
+                content_encoding = resp_headers.get("Content-Encoding", "").lower()
+
+                is_sse = ("text/event-stream" in content_type.lower()) or (
+                    "chunked" in transfer_encoding and "application/json" not in content_type.lower()
+                )
+
+                if is_sse:
+                    self.send_response(resp_status)
+                    for h_key, h_val in resp_headers.items():
+                        if h_key.lower() not in ("transfer-encoding", "content-length"):
+                            self.send_header(h_key, h_val)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+
+                    accumulator = SSEAccumulator()
+                    decompressor = None
+                    if "gzip" in content_encoding:
+                        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    elif "deflate" in content_encoding:
+                        decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+
+                    client_disconnected = False
+                    try:
+                        while True:
+                            raw_chunk = resp.read1(65536) if hasattr(resp, "read1") else resp.readline()
+                            if not raw_chunk:
+                                break
+
+                            # Forward chunk immediately to client in real time
+                            if not client_disconnected:
+                                try:
+                                    chunk_header = f"{len(raw_chunk):X}\r\n".encode("ascii")
+                                    self.wfile.write(chunk_header + raw_chunk + b"\r\n")
+                                    self.wfile.flush()
+                                except Exception as write_err:
+                                    client_disconnected = True
+                                    logger.debug("Client disconnected during SSE stream: %s", write_err)
+
+                            # Side-channel observation accumulation
+                            if is_chat and session:
+                                try:
+                                    if decompressor:
+                                        decomp = decompressor.decompress(raw_chunk)
+                                        if decomp:
+                                            accumulator.feed_bytes(decomp)
+                                    else:
+                                        accumulator.feed_bytes(raw_chunk)
+                                except Exception as acc_err:
+                                    logger.debug("Error feeding SSE chunk to accumulator: %s", acc_err)
+
+                        # Terminate chunked stream to client
+                        if not client_disconnected:
+                            try:
+                                self.wfile.write(b"0\r\n\r\n")
+                                self.wfile.flush()
+                            except Exception:
+                                pass
+                    finally:
+                        # Reconstruct full response and feed into observation pipeline
+                        if is_chat and session:
+                            try:
+                                if decompressor:
+                                    decomp_end = decompressor.flush()
+                                    if decomp_end:
+                                        accumulator.feed_bytes(decomp_end)
+                                reconstructed = accumulator.finalize()
+                                session.process_response_after_call(reconstructed)
+                            except Exception as exc:
+                                if not self.fail_open:
+                                    raise
+                                logger.warning("Guard post-call SSE observation failed open: %s", exc)
+
+                    return
+
+                # Non-streaming responses
                 resp_body = resp.read()
 
                 # Post-call observation for non-streaming completions
                 if is_chat and session and resp_body:
                     try:
-                        content_type = resp_headers.get("Content-Type", "")
-                        content_encoding = resp_headers.get("Content-Encoding", "")
                         if "application/json" in content_type:
                             decompressed_body = _decompress_response_body(resp_body, content_encoding)
                             resp_json = json.loads(decompressed_body.decode("utf-8"))

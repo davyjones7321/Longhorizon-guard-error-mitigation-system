@@ -847,4 +847,122 @@ class TestGuardConfigIntegration:
         assert guard._drift_monitor.drift_threshold == 0.40
 
 
+class TestStatusCodeKeywordRegression:
+    """Verify that 404/500 status codes in code do not cause false positives, while genuine external errors fire."""
+
+    def test_rest_api_status_codes_not_flagged_as_external_error(self, guard):
+        """Realistic REST API code containing 404/500 status codes (abort call, test assertions) must NOT flag external_error."""
+        # 1. Route handler with abort(404)
+        step_route = {
+            "step_index": 0,
+            "reasoning": "Handle missing item by aborting with 404 status code.",
+            "action_name": "edit_file",
+            "action_args": {
+                "path": "app/routes.py",
+                "content": (
+                    "@app.route('/items/<int:item_id>')\n"
+                    "def get_item(item_id):\n"
+                    "    item = db.find(item_id)\n"
+                    "    if item is None:\n"
+                    "        abort(404)\n"
+                    "    return jsonify(item)\n"
+                ),
+            },
+            "tool_response": "Applied edit to app/routes.py",
+        }
+        res_route = guard.on_step(step_route, history=[], metadata={"run_id": "test_rest_001"})
+        assert res_route["flagged"] is False
+        assert res_route["match_details"] is None
+
+        # 2. Test assertions with 404 and 500 status codes
+        step_test = {
+            "step_index": 1,
+            "reasoning": "Add test assertions for 404 not-found and 500 server fault responses.",
+            "action_name": "edit_file",
+            "action_args": {
+                "path": "tests/test_routes.py",
+                "content": (
+                    "def test_item_not_found(client):\n"
+                    "    resp = client.get('/items/999')\n"
+                    "    assert resp.status_code == 404\n\n"
+                    "def test_server_fault(client):\n"
+                    "    resp = client.post('/items/crash')\n"
+                    "    assert resp.status_code == 500\n"
+                ),
+            },
+            "tool_response": "Applied edit to tests/test_routes.py",
+        }
+        res_test = guard.on_step(step_test, history=[step_route], metadata={"run_id": "test_rest_002"})
+        assert res_test["flagged"] is False
+        assert res_test["match_details"] is None
+
+    def test_genuine_external_error_fires_on_500_server_error(self, guard_no_patterns):
+        """Genuine external error language 'Connection error: 500 Internal Server Error from upstream API' must fire."""
+        step = {
+            "step_index": 2,
+            "reasoning": "Calling external payment gateway.",
+            "action_name": "call_api",
+            "action_args": {"endpoint": "https://api.payment.com/v1/charge"},
+            "tool_response": "Connection error: 500 Internal Server Error from upstream API",
+        }
+        result = guard_no_patterns.on_step(step, history=[], metadata={"run_id": "test_ext_001"})
+        assert result["flagged"] is True
+        details = result.get("match_details")
+        assert details is not None
+        assert details["category"] == "external_error"
+        assert details["rule_id"] == "external_env_error"
+
+    def test_genuine_external_error_fires_on_http_404(self, guard_no_patterns):
+        """Genuine external error language 'HTTP 404 error: endpoint not found on upstream service' must fire."""
+        step = {
+            "step_index": 3,
+            "reasoning": "Observed HTTP 404 error from upstream service.",
+            "action_name": "fetch",
+            "action_args": {"url": "https://api.service.internal/data"},
+            "tool_response": "HTTP 404 error: endpoint not found on remote server",
+        }
+        result = guard_no_patterns.on_step(step, history=[], metadata={"run_id": "test_ext_002"})
+        assert result["flagged"] is True
+        details = result.get("match_details")
+        assert details is not None
+        assert details["category"] == "external_error"
+        assert details["rule_id"] == "external_env_error"
+
+    def test_audited_bare_keywords_no_false_positives(self, guard):
+        """Audited bare keywords (timeout=10, looping, instead of) must not trigger false positives."""
+        # 1. requests.get with timeout=10 should NOT flag external_step_limit
+        s_timeout = {
+            "step_index": 0,
+            "reasoning": "Fetch data with timeout=10 configuration.",
+            "action_name": "edit_file",
+            "action_args": {"path": "fetch.py", "content": "requests.get(url, timeout=10)"},
+            "tool_response": "Applied edit",
+        }
+        r_timeout = guard.on_step(s_timeout, history=[])
+        assert r_timeout["flagged"] is False
+
+        # 2. 'Looping over the items' should NOT flag memory_repeated_action
+        s_loop = {
+            "step_index": 1,
+            "reasoning": "Looping over the items in the list to calculate total.",
+            "action_name": "edit_file",
+            "action_args": {"path": "calc.py", "content": "for x in items: total += x"},
+            "tool_response": "Applied edit",
+        }
+        r_loop = guard.on_step(s_loop, history=[])
+        assert r_loop["flagged"] is False
+
+        # 3. 'use dictionary instead of list' should NOT flag reflection_wrong_object
+        s_instead = {
+            "step_index": 2,
+            "reasoning": "I will use a dictionary instead of a list for fast lookups.",
+            "action_name": "edit_file",
+            "action_args": {"path": "store.py", "content": "lookup = {}"},
+            "tool_response": "Applied edit",
+        }
+        r_instead = guard.on_step(s_instead, history=[])
+        assert r_instead["flagged"] is False
+
+
+
 

@@ -157,10 +157,12 @@ def _build_keyword_rules() -> List[KeywordRule]:
             keyword_sets=[
                 {"nothing", "happens"},
                 {"invalid", "action"},
-                {"malformed"},
+                {"malformed", "action"},
+                {"malformed", "call"},
                 {"syntax", "error"},
                 {"unknown", "action"},
-                {"unrecognized"},
+                {"unrecognized", "action"},
+                {"unrecognized", "command"},
                 {"parse", "error"},
             ],
         ),
@@ -184,10 +186,15 @@ def _build_keyword_rules() -> List[KeywordRule]:
             keyword_sets=[
                 {"step", "limit"},
                 {"maximum", "steps"},
-                {"timeout"},
+                {"step", "timeout"},
+                {"timed", "out"},
+                {"timeout", "limit"},
+                {"execution", "timeout"},
                 {"exceeded", "limit"},
                 {"max", "turns"},
-                {"truncated"},
+                {"trajectory", "truncated"},
+                {"steps", "truncated"},
+                {"truncated", "limit"},
             ],
         ),
         KeywordRule(
@@ -197,8 +204,12 @@ def _build_keyword_rules() -> List[KeywordRule]:
             keyword_sets=[
                 {"connection", "error"},
                 {"server", "error"},
-                {"404"},
-                {"500"},
+                {"404", "error"},
+                {"http", "404"},
+                {"api", "404"},
+                {"500", "error"},
+                {"http", "500"},
+                {"api", "500"},
                 {"api", "error"},
                 {"network", "error"},
                 {"rate", "limit"},
@@ -214,8 +225,11 @@ def _build_keyword_rules() -> List[KeywordRule]:
                 {"already", "visited"},
                 {"already", "explored"},
                 {"repeated", "action"},
-                {"revisit"},
-                {"looping"},
+                {"revisit", "action"},
+                {"revisit", "same"},
+                {"infinite", "loop"},
+                {"looping", "action"},
+                {"stuck", "loop"},
                 {"same", "action", "again"},
             ],
         ),
@@ -224,12 +238,17 @@ def _build_keyword_rules() -> List[KeywordRule]:
             category="memory_error",
             description="Agent forgot or contradicted a prior observation",
             keyword_sets=[
-                {"forgot"},
+                {"forgot", "observation"},
+                {"forgot", "previously"},
+                {"forgot", "earlier"},
                 {"contradicts", "earlier"},
                 {"previously", "observed"},
                 {"already", "found"},
-                {"oversimplif"},  # matches oversimplified, oversimplifying
-                {"hallucinated"},
+                {"oversimplif", "memory"},
+                {"oversimplif", "experience"},
+                {"oversimplif", "recall"},
+                {"hallucinated", "observation"},
+                {"hallucinated", "action"},
             ],
         ),
         # --- planning_error ---
@@ -250,11 +269,12 @@ def _build_keyword_rules() -> List[KeywordRule]:
             category="planning_error",
             description="Agent used blind sequential enumeration instead of informed search",
             keyword_sets=[
-                {"one", "by", "one"},
+                {"one by one"},
                 {"sequential", "search"},
-                {"exhaustive"},
-                {"cabinet", "by", "cabinet"},
-                {"drawer", "by", "drawer"},
+                {"exhaustive", "search"},
+                {"exhaustive", "enumeration"},
+                {"cabinet by cabinet"},
+                {"drawer by drawer"},
                 {"mechanical", "strategy"},
             ],
         ),
@@ -265,10 +285,12 @@ def _build_keyword_rules() -> List[KeywordRule]:
             description="Agent acted on the wrong object or misjudged object state",
             keyword_sets=[
                 {"wrong", "object"},
-                {"instead", "of"},
+                {"wrong", "instead", "of"},
+                {"picked", "instead", "of"},
                 {"not", "clean"},
-                {"misjudged"},
-                {"misidentified"},
+                {"misjudged", "object"},
+                {"misjudged", "state"},
+                {"misidentified", "object"},
                 {"incomplete", "state"},
             ],
         ),
@@ -280,7 +302,8 @@ def _build_keyword_rules() -> List[KeywordRule]:
                 {"ignored", "feedback"},
                 {"nothing", "happens"},
                 {"failed", "recognize"},
-                {"misinterpreted"},
+                {"misinterpreted", "feedback"},
+                {"misinterpreted", "response"},
                 {"did", "not", "notice"},
             ],
         ),
@@ -987,6 +1010,13 @@ class GuardInterface:
                             run_id, step_idx, match.category, match.confidence,
                             match.rule_id, match.description, ts,
                         )
+
+                # Check tool_response for external environment/API errors if not already matched
+                if (match is None or not match.matched) and step_record.get("tool_response"):
+                    resp_str = str(step_record["tool_response"])
+                    resp_match = self._matcher.match(resp_str, run_id=run_id, step_index=step_idx)
+                    if resp_match.matched and resp_match.category == "external_error":
+                        match = resp_match
 
                 if match.matched:
                     result["drift_detected"] = True

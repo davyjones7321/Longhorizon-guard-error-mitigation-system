@@ -963,6 +963,81 @@ class TestStatusCodeKeywordRegression:
         r_instead = guard.on_step(s_instead, history=[])
         assert r_instead["flagged"] is False
 
+    def test_tool_response_flags_memory_error_hallucinated_observation(self, guard_no_patterns):
+        """Genuine memory_error language occurring only in tool_response must be flagged."""
+        step = {
+            "step_index": 0,
+            "reasoning": "Check environment observation status.",
+            "action_name": "verify_state",
+            "action_args": {},
+            "tool_response": "Agent hallucinated an observation that was never actually returned by environment",
+        }
+        res = guard_no_patterns.on_step(step, history=[])
+        assert res["flagged"] is True
+        details = res.get("match_details")
+        assert details is not None
+        assert details["category"] == "memory_error"
+        assert details["rule_id"] == "memory_forgot_observation"
+
+    def test_tool_response_flags_memory_error_infinite_loop(self, guard_no_patterns):
+        """Infinite loop detection appearing only in tool_response must be flagged as memory_error."""
+        step = {
+            "step_index": 1,
+            "reasoning": "Inspect loop monitor log.",
+            "action_name": "read_log",
+            "action_args": {"path": "monitor.log"},
+            "tool_response": "Agent is stuck in an infinite loop revisiting the same action",
+        }
+        res = guard_no_patterns.on_step(step, history=[])
+        assert res["flagged"] is True
+        details = res.get("match_details")
+        assert details is not None
+        assert details["category"] == "memory_error"
+        assert details["rule_id"] == "memory_repeated_action"
+
+    def test_tool_response_flags_tool_error_unrecognized_command(self, guard_no_patterns):
+        """Malformed tool use syntax/command error occurring only in tool_response must be flagged as tool_error."""
+        step = {
+            "step_index": 2,
+            "reasoning": "Execute CLI utility.",
+            "action_name": "run_bash",
+            "action_args": {"command": "tool_cli --invalid-flag"},
+            "tool_response": "Error: unrecognized command and syntax error in arguments",
+        }
+        res = guard_no_patterns.on_step(step, history=[])
+        assert res["flagged"] is True
+        details = res.get("match_details")
+        assert details is not None
+        assert details["category"] == "tool_use_error"
+        assert details["rule_id"] == "tool_use_malformed_action"
+
+    def test_benign_tool_response_status_codes_not_flagged(self, guard):
+        """Benign status numbers in tool_response (e.g. 404 lines changed, 500 records) must NOT flag."""
+        # 1. '404 lines changed' in tool_response
+        s_404 = {
+            "step_index": 0,
+            "reasoning": "Apply bulk migration to source files.",
+            "action_name": "apply_patch",
+            "action_args": {"patch": "migration.patch"},
+            "tool_response": "Applied edit, 404 lines changed, 0 failures",
+        }
+        r_404 = guard.on_step(s_404, history=[])
+        assert r_404["flagged"] is False
+        assert r_404["match_details"] is None
+
+        # 2. 'Processed 500 records' in tool_response
+        s_500 = {
+            "step_index": 1,
+            "reasoning": "Run database batch ingestion job.",
+            "action_name": "ingest_batch",
+            "action_args": {"batch_size": 500},
+            "tool_response": "Successfully processed 500 records in 150ms",
+        }
+        r_500 = guard.on_step(s_500, history=[])
+        assert r_500["flagged"] is False
+        assert r_500["match_details"] is None
+
+
 
 
 

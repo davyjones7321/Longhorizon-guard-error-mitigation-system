@@ -483,13 +483,20 @@ class PatternMatcher:
             vec = _tfidf_vector(tokens, self._idf)
             self._pattern_centroids.append(vec)
 
-    def match(self, text: str, run_id: str = "", step_index: int = -1) -> MatchResult:
+    def match(
+        self,
+        text: str,
+        run_id: str = "",
+        step_index: int = -1,
+        allow_cluster: bool = True,
+    ) -> MatchResult:
         """Run two-layer matching with timeout. Fails open on any error.
 
         Args:
             text: The combined reasoning + action text to check.
             run_id: For logging context.
             step_index: For logging context.
+            allow_cluster: Whether to evaluate Layer A cluster similarity (default True).
 
         Returns:
             MatchResult (matched=False if nothing flagged or on error).
@@ -498,7 +505,10 @@ class PatternMatcher:
 
         def _do_match():
             nonlocal result
-            result = self._match_impl(text)
+            try:
+                result = self._match_impl(text, allow_cluster=allow_cluster)
+            except TypeError:
+                result = self._match_impl(text)
 
         thread = threading.Thread(target=_do_match, daemon=True)
         thread.start()
@@ -522,12 +532,13 @@ class PatternMatcher:
 
         return result
 
-    def _match_impl(self, text: str) -> MatchResult:
+    def _match_impl(self, text: str, allow_cluster: bool = True) -> MatchResult:
         """Internal two-layer match logic (no timeout wrapper)."""
         # Layer A: Cluster similarity
-        cluster_result = self._cluster_match(text)
-        if cluster_result.matched:
-            return cluster_result
+        if allow_cluster:
+            cluster_result = self._cluster_match(text)
+            if cluster_result.matched:
+                return cluster_result
 
         # Layer B: Keyword rules
         keyword_result = self._keyword_match(text)
@@ -1011,11 +1022,14 @@ class GuardInterface:
                             match.rule_id, match.description, ts,
                         )
 
-                # Check tool_response for external environment/API errors if not already matched
+                # Check tool_response for error matches across categories (Layer B keyword rules,
+                # excluding Layer A cluster matches to prevent environment prompt boilerplate false positives)
                 if (match is None or not match.matched) and step_record.get("tool_response"):
                     resp_str = str(step_record["tool_response"])
-                    resp_match = self._matcher.match(resp_str, run_id=run_id, step_index=step_idx)
-                    if resp_match.matched and resp_match.category == "external_error":
+                    resp_match = self._matcher.match(
+                        resp_str, run_id=run_id, step_index=step_idx, allow_cluster=False
+                    )
+                    if resp_match.matched:
                         match = resp_match
 
                 if match.matched:

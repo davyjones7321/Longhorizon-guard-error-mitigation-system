@@ -116,9 +116,15 @@ def parse_plan_subgoals(proposed_plan: str) -> Tuple[List[SubgoalRecord], bool]:
 # RULE 1: Success Keywords in Tool Response
 _SUCCESS_KEYWORDS = {
     "you pick up", "you take", "you open", "you close", "you clean",
-    "you heat", "you cool", "you examine", "you put", "you arrive at",
-    "found", "success", "task complete", "you see", "unlocked",
+    "you heat", "you cool", "you put", "you arrive at",
+    "found", "success", "task complete", "unlocked",
 }
+
+_NEGATIVE_FOUND_PATTERN = re.compile(
+    r"\b(?:not|0|none|no|nothing|never|couldn't|cannot)\s+(?:found|results?)\b|\b(?:not|nothing)\s+found\b",
+    re.IGNORECASE,
+)
+_POSITIVE_FOUND_PATTERN = re.compile(r"\b(?:found|discovered)\b", re.IGNORECASE)
 
 # RULE 2: Failure Keywords & Patterns in Tool Response (F-07)
 # Negative patterns for benign phrasings where "error" is explicitly absent or zero:
@@ -205,6 +211,9 @@ def _check_step_outcome(
     # --- Rule S2: Explicit Observation Success ---
     for kw in _SUCCESS_KEYWORDS:
         if kw in tool_resp:
+            if kw == "found":
+                if _NEGATIVE_FOUND_PATTERN.search(tool_resp) or not _POSITIVE_FOUND_PATTERN.search(tool_resp):
+                    continue
             # If active subgoal step count >= 1 and success kw observed
             if subgoal_step_count >= 1:
                 return SubgoalStatus.COMPLETED.value, f"Observation confirmed success keyword '{kw}'"
@@ -246,6 +255,21 @@ class SubgoalTracker:
     @property
     def is_initialized(self) -> bool:
         return len(self._subgoals) > 0
+
+    @property
+    def subgoals(self) -> List[SubgoalRecord]:
+        return self._subgoals
+
+    @property
+    def active_subgoal(self) -> Optional[SubgoalRecord]:
+        if 0 <= self._active_idx < len(self._subgoals):
+            return self._subgoals[self._active_idx]
+        return None
+
+    @property
+    def is_fallback(self) -> bool:
+        """Return True if SubgoalTracker is in single-subgoal fallback mode."""
+        return self._is_fallback
 
     def init_plan(
         self,
@@ -406,6 +430,64 @@ class SubgoalTracker:
                     "is_fallback": True,
                 },
             }
+
+    def update_subgoal_status(
+        self,
+        subgoal_id: str,
+        status: str,
+        step_index: int = -1,
+        trigger_reason: str = "host_boundary_event",
+    ) -> Optional[Dict[str, Any]]:
+        """Directly update active subgoal status from an external boundary event."""
+        try:
+            if not self._subgoals:
+                return None
+
+            # Find matching subgoal by id or fallback to current active subgoal
+            target_idx = None
+            for idx, sg in enumerate(self._subgoals):
+                if sg.subgoal_id == subgoal_id:
+                    target_idx = idx
+                    break
+            if target_idx is None:
+                target_idx = self._active_idx
+
+            if target_idx >= len(self._subgoals):
+                return None
+
+            target = self._subgoals[target_idx]
+            now = time.time()
+            target.status = status
+            target.completed_at = now
+            target.completion_trigger = trigger_reason
+
+            if status == SubgoalStatus.COMPLETED.value:
+                self._completed_count += 1
+            elif status == SubgoalStatus.STALLED_ADVANCED.value:
+                self._stalled_advanced_count += 1
+            elif status == SubgoalStatus.FAILED.value:
+                self._failed_count += 1
+
+            # If the updated subgoal was the active one and it reached terminal state, advance
+            if target_idx == self._active_idx and status in (
+                SubgoalStatus.COMPLETED.value,
+                SubgoalStatus.STALLED_ADVANCED.value,
+                SubgoalStatus.FAILED.value,
+            ):
+                self._active_idx += 1
+                if self._active_idx < len(self._subgoals):
+                    next_active = self._subgoals[self._active_idx]
+                    next_active.status = SubgoalStatus.IN_PROGRESS.value
+                    next_active.started_at = now
+
+            logger.info(
+                "subgoal_status_updated subgoal_id=%s status=%s active_idx=%d",
+                target.subgoal_id, status, self._active_idx,
+            )
+            return {"updated_subgoal_id": target.subgoal_id, "status": status, "active_subgoal_index": self._active_idx}
+        except Exception:
+            logger.exception("update_subgoal_status error in SubgoalTracker — failing open")
+            return None
 
     def get_state_payload(self) -> SubgoalStatePayload:
         """Expose current state payload format for drift_monitor consumption."""

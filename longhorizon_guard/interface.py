@@ -97,7 +97,7 @@ def _derive_error_type_from_reflection(refl_info: Dict[str, Any]) -> str:
       - If reasoning cites reflection or repeated mistakes -> reflection_error.
       - If reasoning cites memory or forgot -> memory_error.
       - If reasoning cites tool failure -> tool_use_error.
-      - Default: "plan_deviation" (fallback when no specific category applies).
+      - Default: "planning_error" (fallback when no specific category applies).
     """
     evidence = [str(s).lower() for s in (refl_info.get("evidence_sources") or [])]
     reasoning = (refl_info.get("revision_reasoning") or "").lower()
@@ -111,7 +111,7 @@ def _derive_error_type_from_reflection(refl_info: Dict[str, Any]) -> str:
         return "memory_error"
     if "tool" in combined:
         return "tool_use_error"
-    return "plan_deviation"
+    return "planning_error"
 
 # Maximum time (seconds) for a single matching call before we bail.
 DEFAULT_MATCH_TIMEOUT_SECONDS: float = 2.0
@@ -213,6 +213,21 @@ def _build_keyword_rules() -> List[KeywordRule]:
                 {"api", "error"},
                 {"network", "error"},
                 {"rate", "limit"},
+            ],
+        ),
+        # --- context_length_error ---
+        KeywordRule(
+            rule_id="context_length_exceeded",
+            category="context_length_error",
+            description="Agent prompt or context window exceeded maximum token length",
+            keyword_sets=[
+                {"context", "length"},
+                {"context", "window"},
+                {"maximum", "tokens"},
+                {"token", "limit"},
+                {"exceeded", "context"},
+                {"prompt", "too", "long"},
+                {"maximum", "context"},
             ],
         ),
         # --- memory_error ---
@@ -383,10 +398,12 @@ class PatternMatcher:
         self,
         pattern_library_path: Optional[str] = "findings/pattern_library.json",
         category_thresholds: Optional[Dict[str, float]] = None,
+        similarity_threshold: Optional[float] = None,
         match_timeout: float = DEFAULT_MATCH_TIMEOUT_SECONDS,
     ) -> None:
         pattern_library_path = pattern_library_path or "findings/pattern_library.json"
         self._match_timeout = match_timeout
+        self._similarity_threshold = similarity_threshold
         self._category_thresholds = category_thresholds or dict(DEFAULT_CATEGORY_THRESHOLDS)
         self._keyword_rules = _build_keyword_rules()
 
@@ -572,14 +589,21 @@ class PatternMatcher:
             return MatchResult()
 
         pattern = self._patterns[best_idx]
-        threshold = self._category_thresholds.get(pattern.category, 0.40)
+        default_thresh = getattr(self, "_similarity_threshold", None)
+        if default_thresh is None:
+            default_thresh = 0.40
+        threshold = self._category_thresholds.get(pattern.category, default_thresh)
 
         if best_sim >= threshold:
+            pattern_conf = getattr(pattern, "confidence", 1.0)
+            if pattern_conf is None or pattern_conf <= 0:
+                pattern_conf = 1.0
+            calibrated_conf = min(0.95, round(best_sim * pattern_conf, 4))
             return MatchResult(
                 matched=True,
                 category=pattern.category,
                 pattern_id=pattern.pattern_id,
-                confidence=round(best_sim, 4),
+                confidence=calibrated_conf,
                 layer="cluster",
                 description=pattern.trigger_description[:200],
                 safe_alternative=pattern.safe_alternative[:200],
@@ -814,42 +838,58 @@ class GuardInterface:
 
         self.config = config
         self.fail_open: bool = config.fail_open
+        self.block_on_critical: bool = getattr(config, "block_on_critical", False)
 
         effective_pattern_path = pattern_library_path or config.pattern_library_path or "findings/pattern_library.json"
         effective_max_subgoal_steps = max_subgoal_steps if max_subgoal_steps is not None else config.max_subgoal_steps
         effective_drift_threshold = drift_threshold if drift_threshold is not None else config.drift_threshold
         effective_refl_interval = config.reflection_step_interval
+        effective_similarity_threshold = config.similarity_threshold
 
         try:
             self._matcher = PatternMatcher(
                 pattern_library_path=effective_pattern_path,
                 category_thresholds=category_thresholds,
+                similarity_threshold=effective_similarity_threshold,
                 match_timeout=match_timeout,
             )
         except Exception:
             logger.exception("GuardInterface init failed — pattern matcher disabled")
+            if not self.fail_open:
+                raise
             self._matcher = None  # type: ignore[assignment]
 
         try:
             self._subgoal_tracker = SubgoalTracker(max_subgoal_steps=effective_max_subgoal_steps)
         except Exception:
             logger.exception("SubgoalTracker init failed — subgoal tracking disabled")
+            if not self.fail_open:
+                raise
             self._subgoal_tracker = None  # type: ignore[assignment]
 
         try:
             self._drift_monitor = DriftMonitor(drift_threshold=effective_drift_threshold)
         except Exception:
             logger.exception("DriftMonitor init failed — drift monitoring disabled")
+            if not self.fail_open:
+                raise
             self._drift_monitor = None  # type: ignore[assignment]
 
         try:
             self._reflector = PlanReflector(step_interval=effective_refl_interval)
         except Exception:
             logger.exception("PlanReflector init failed — periodic plan reflection disabled")
+            if not self.fail_open:
+                raise
             self._reflector = None  # type: ignore[assignment]
 
         self._live_steps_recorded: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         self._in_replay: bool = False
+
+    @property
+    def subgoal_tracker(self) -> Optional[Any]:
+        """Return the active SubgoalTracker instance if initialized."""
+        return self._subgoal_tracker
 
     # ---- Hook 1: on_plan_proposed ----
 
@@ -936,8 +976,12 @@ class GuardInterface:
         except Exception:
             logger.exception("on_plan_proposed error — failing open, run_id=%s",
                              (metadata or {}).get("run_id", "?"))
+            if not self.fail_open:
+                raise
 
         result["flagged"] = bool(result.get("flags"))
+        if result["flagged"] and (self.block_on_critical or (metadata or {}).get("block_on_critical")):
+            result["approved"] = False
         return result
 
     # ---- Hook 2: on_step ----
@@ -968,6 +1012,9 @@ class GuardInterface:
             "drift_detected": False,
             "warning": None,
             "match_details": None,
+            "category": None,
+            "confidence": 0.0,
+            "suggestions": [],
         }
         try:
             # Process step in SubgoalTracker first
@@ -1091,6 +1138,8 @@ class GuardInterface:
                 (metadata or {}).get("run_id", "?"),
                 step_record.get("step_index", -1),
             )
+            if not self.fail_open:
+                raise
         finally:
             # FIX C: flagged convenience field across all 3 sub-systems
             is_matched = result.get("match_details") is not None
@@ -1098,6 +1147,44 @@ class GuardInterface:
             refl = result.get("reflection_result")
             is_refl_revision = bool(refl and refl.get("revision_suggested"))
             result["flagged"] = is_matched or is_drift or is_refl_revision
+
+            # Top-level convenience schema fields for consumers (hook.py, proxy.py, client_wrapper.py)
+            match_details = result.get("match_details")
+            drift_info = result.get("drift_assessment")
+
+            if match_details:
+                result["category"] = match_details.get("category")
+                result["confidence"] = match_details.get("confidence", 0.0)
+                suggestions = []
+                if match_details.get("safe_alternative"):
+                    suggestions.append(match_details["safe_alternative"])
+                if refl and refl.get("revision_reasoning"):
+                    suggestions.append(refl["revision_reasoning"])
+                result["suggestions"] = suggestions
+            elif drift_info and drift_info.get("drift_detected"):
+                result["category"] = "drift"
+                result["confidence"] = drift_info.get("drift_score", 0.0)
+                suggestions = []
+                if refl and refl.get("revision_reasoning"):
+                    suggestions.append(refl["revision_reasoning"])
+                result["suggestions"] = suggestions
+            elif is_refl_revision and refl:
+                result["category"] = "planning_error"
+                result["confidence"] = refl.get("confidence", 0.0)
+                result["suggestions"] = [refl["revision_reasoning"]] if refl.get("revision_reasoning") else []
+            else:
+                result["category"] = None
+                result["confidence"] = 0.0
+                result["suggestions"] = []
+
+            # Execution continuation control (Finding 8):
+            if result.get("flagged") and (self.block_on_critical or (metadata or {}).get("block_on_critical")):
+                drift_crit = bool(drift_info and drift_info.get("severity_level") == "critical")
+                loop_block = bool(match_details and match_details.get("rule_id") == "structural_action_repetition")
+                high_conf = bool(result.get("confidence", 0.0) >= 0.85)
+                if drift_crit or loop_block or high_conf:
+                    result["continue_execution"] = False
+
             if not getattr(self, "_in_replay", False):
                 self._live_steps_recorded.append((dict(step_record), dict(result)))
 
@@ -1133,6 +1220,11 @@ class GuardInterface:
         }
         try:
             if self._subgoal_tracker is not None:
+                self._subgoal_tracker.update_subgoal_status(
+                    subgoal_id=subgoal_id,
+                    status=subgoal_status,
+                    step_index=len(step_history),
+                )
                 state = self._subgoal_tracker.get_state_payload()
                 result["subgoal_state"] = state.to_dict()
                 result["next_subgoal"] = state.current_subgoal_id
@@ -1160,6 +1252,8 @@ class GuardInterface:
 
         except Exception:
             logger.exception("on_subgoal_boundary error — failing open")
+            if not self.fail_open:
+                raise
         return result
 
     # ---- Hook 4: on_run_end ----
@@ -1293,34 +1387,48 @@ class GuardInterface:
             result["flags_summary"] = all_flags
 
             # Fallback Chain Application:
-            # Tier 1: Pattern Matcher / Structural Rules
-            if earliest_pattern_match is not None:
-                result["root_cause_step_index"] = earliest_pattern_step_idx
-                result["root_cause_error_type"] = earliest_pattern_match["category"]
-                result["root_cause_source"] = "pattern_match"
+            # Chronologically earliest root-cause attribution across all detection layers.
+            # Ties at the exact same step_index break using tier reliability:
+            # Tier 1 (pattern_match) > Tier 2 (drift_monitor) > Tier 3 (reflector)
+            candidates = []
+            if earliest_pattern_match is not None and earliest_pattern_step_idx is not None:
+                candidates.append((
+                    earliest_pattern_step_idx,
+                    1,
+                    earliest_pattern_match["category"],
+                    "pattern_match",
+                ))
 
-            # Tier 2: Drift Monitor Signals
-            elif earliest_drift_assessment is not None:
-                result["root_cause_step_index"] = earliest_drift_step_idx
-                result["root_cause_error_type"] = _derive_error_type_from_drift(earliest_drift_assessment)
-                result["root_cause_source"] = "drift_monitor"
+            if earliest_drift_assessment is not None and earliest_drift_step_idx is not None:
+                candidates.append((
+                    earliest_drift_step_idx,
+                    2,
+                    _derive_error_type_from_drift(earliest_drift_assessment),
+                    "drift_monitor",
+                ))
 
-            # Tier 3: Plan Reflector Signals
-            elif earliest_refl_result is not None or (
-                result.get("reflection_summary") and result["reflection_summary"].get("revision_suggested")
-            ):
-                if earliest_refl_result is not None:
-                    target_refl = earliest_refl_result
-                    target_step = earliest_refl_step_idx
-                else:
-                    target_refl = result["reflection_summary"]
-                    target_step = steps[-1].get("step_index", len(steps) - 1) if steps else 0
+            if earliest_refl_result is not None and earliest_refl_step_idx is not None:
+                candidates.append((
+                    earliest_refl_step_idx,
+                    3,
+                    _derive_error_type_from_reflection(earliest_refl_result),
+                    "reflector",
+                ))
+            elif result.get("reflection_summary") and result["reflection_summary"].get("revision_suggested"):
+                target_step = steps[-1].get("step_index", len(steps) - 1) if steps else 0
+                candidates.append((
+                    target_step,
+                    3,
+                    _derive_error_type_from_reflection(result["reflection_summary"]),
+                    "reflector",
+                ))
 
-                result["root_cause_step_index"] = target_step
-                result["root_cause_error_type"] = _derive_error_type_from_reflection(target_refl)
-                result["root_cause_source"] = "reflector"
-
-            # Tier 4: Clean Run
+            if candidates:
+                candidates.sort(key=lambda c: (c[0], c[1]))
+                best_step, _, best_error_type, best_source = candidates[0]
+                result["root_cause_step_index"] = best_step
+                result["root_cause_error_type"] = best_error_type
+                result["root_cause_source"] = best_source
             else:
                 result["root_cause_step_index"] = None
                 result["root_cause_error_type"] = None
@@ -1340,6 +1448,8 @@ class GuardInterface:
                 "on_run_end error — failing open, run_id=%s",
                 (metadata or {}).get("run_id", "?"),
             )
+            if not self.fail_open:
+                raise
         finally:
             self._live_steps_recorded = []
 

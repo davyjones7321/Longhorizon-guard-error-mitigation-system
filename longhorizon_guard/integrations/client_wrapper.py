@@ -1,4 +1,4 @@
-﻿"""OpenAI-compatible LLM client middleware wrapper for longhorizon_guard.
+"""OpenAI-compatible LLM client middleware wrapper for longhorizon_guard.
 
 Provides transparent trajectory observation by intercepting chat.completions.create()
 calls on openai.OpenAI() or any OpenAI-compatible client.
@@ -115,10 +115,15 @@ class WrappedOpenAIClient:
             for msg in messages:
                 role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
                 content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+                text_content = str(content or "")
                 if role == "user" and not task_desc:
-                    task_desc = str(content or "")
-                elif role == "system" and not task_desc and "task" in str(content or "").lower():
-                    task_desc = str(content or "")
+                    task_desc = text_content
+                elif role == "system" and not task_desc and "task" in text_content.lower():
+                    task_desc = text_content
+
+                # Extract plan text if present in user or system prompt
+                if not plan_text and any(marker in text_content for marker in ("1.", "Step 1", "Plan:", "subgoal", "\n- ")):
+                    plan_text = text_content
 
             if task_desc:
                 self._task_description = task_desc
@@ -201,6 +206,20 @@ class WrappedOpenAIClient:
         content = getattr(message, "content", "") or ""
         reasoning = getattr(message, "reasoning_content", None) or content
 
+        # If tracker was in fallback, check if assistant's initial response defines a plan
+        if (
+            getattr(self.guard, "subgoal_tracker", None)
+            and getattr(self.guard.subgoal_tracker, "is_fallback", False)
+            and self._step_counter == 0
+        ):
+            candidate_plan = reasoning or content
+            if any(marker in candidate_plan for marker in ("1.", "Step 1", "Plan:", "Phase 1", "\n- ")):
+                self.guard.on_plan_proposed(
+                    task_description=self._task_description,
+                    proposed_plan=candidate_plan,
+                    metadata={"source": "openai_client_wrapper", "turn": "assistant_plan"},
+                )
+
         tool_calls = getattr(message, "tool_calls", None)
         if tool_calls and isinstance(tool_calls, list):
             for tc in tool_calls:
@@ -259,3 +278,8 @@ def wrap_guard(
         on_flag=on_flag,
         fail_open=fail_open,
     )
+
+
+# Backward-compatibility alias
+OpenAIClientWrapper = WrappedOpenAIClient
+

@@ -181,8 +181,9 @@ class PlanReflector:
             evidence_sources.append("drift_monitor")
             drift_detected = drift_assessment.get("drift_detected", False)
             drift_severity = drift_assessment.get("severity_score", 0.0)
+            drift_level = drift_assessment.get("severity_level", "none")
 
-            if drift_severity >= 0.50 or (drift_detected and (stalled_count + failed_count) >= 1):
+            if drift_level in ("high", "critical") or drift_severity >= 0.60 or (drift_detected and (stalled_count + failed_count) >= 1):
                 signals = drift_assessment.get("triggered_signals", [])
                 invalidation_reasons.append(
                     f"Drift monitor severity high ({drift_severity:.2f}, signals: {','.join(signals)})"

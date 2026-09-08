@@ -128,6 +128,105 @@ class TestHookIntegration(unittest.TestCase):
         self.assertIn("step", types)
         self.assertIn("summary", types)
 
+    def test_state_restoration_across_invocations(self):
+        """Engine state and tracker must be reconstructed from disk on stateless hook calls."""
+        session_id = "test-session-restore"
+        # 1. UserPromptSubmit establishes plan
+        handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "1. Build auth 2. Build api",
+        }, log_dir=self.test_dir)
+
+        # 2. Step 1 executes
+        handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file": "auth.py"},
+            "tool_response": "auth written",
+        }, log_dir=self.test_dir)
+
+        # 3. Next step with guard=None (simulates separate CLI invocation)
+        handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file": "api.py"},
+            "tool_response": "api written",
+        }, log_dir=self.test_dir, guard=None)
+
+        state_path = os.path.join(self.test_dir, f"_state_{session_id}.json")
+        self.assertTrue(os.path.exists(state_path))
+        with open(state_path, "r", encoding="utf-8") as f:
+            saved_state = json.load(f)
+        self.assertEqual(saved_state["step_counter"], 2)
+        self.assertEqual(len(saved_state["history"]), 2)
+        self.assertTrue(len(saved_state.get("proposed_plan", "")) >= 2)
+
+    def test_history_repetition_exact_threshold(self):
+        """Action repetition heuristic must not self-match; triggers on 3rd identical action, not 2nd."""
+        session_id = "test-session-exact-rep"
+        tool_name = "Read"
+        tool_input = {"path": "config.yaml"}
+        resp = "server: localhost"
+
+        # Step 1: 1st time action executes -> should NOT flag
+        r1 = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_response": resp,
+        }, log_dir=self.test_dir)
+        self.assertTrue(r1.get("continue"))
+
+        # Step 2: 2nd time action executes -> prior history has 1 instance -> should NOT flag
+        r2 = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_response": resp,
+        }, log_dir=self.test_dir)
+        self.assertTrue(r2.get("continue"))
+
+        # Step 3: 3rd time action executes -> prior history has 2 instances -> triggers repetition flag!
+        r3 = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_response": resp,
+        }, log_dir=self.test_dir)
+        self.assertIn("hookSpecificOutput", r3)
+        self.assertIn("additionalContext", r3["hookSpecificOutput"])
+        self.assertIn("repeated 2 times", r3["hookSpecificOutput"]["additionalContext"].lower())
+
+    def test_post_tool_use_steer_contains_category_and_suggestions(self):
+        """PostToolUse alert and log must contain top-level category and confidence."""
+        session_id = "test-session-schema"
+        resp = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Curl",
+            "tool_input": {"url": "http://example.com/api"},
+            "tool_response": "HTTP 404 error: resource not found on remote server",
+        }, log_dir=self.test_dir)
+
+        self.assertIn("hookSpecificOutput", resp)
+        self.assertIn("additionalContext", resp["hookSpecificOutput"])
+
+        log_path = os.path.join(self.test_dir, f"session_{session_id}.jsonl")
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = [json.loads(l) for l in f]
+        self.assertEqual(len(lines), 1)
+        step_entry = lines[0]
+        self.assertTrue(step_entry["flagged"])
+        self.assertEqual(step_entry["category"], "external_error")
+        self.assertIsInstance(step_entry["confidence"], float)
+        self.assertIsInstance(step_entry["suggestions"], list)
+
 
 if __name__ == "__main__":
     unittest.main()

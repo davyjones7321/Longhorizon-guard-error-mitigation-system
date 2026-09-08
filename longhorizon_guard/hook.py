@@ -44,6 +44,7 @@ def _load_session_state(session_id: str, log_dir: str) -> Dict[str, Any]:
         "session_id": session_id,
         "step_counter": 0,
         "task_description": "",
+        "proposed_plan": "",
         "history": [],
         "recent_actions": [],
         "created_at": datetime.datetime.now().isoformat(),
@@ -77,22 +78,44 @@ def _append_session_log(session_id: str, entry: Dict[str, Any], log_dir: str) ->
 
 def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None, log_dir: str = DEFAULT_HOOK_LOG_DIR) -> Dict[str, Any]:
     """Process a single lifecycle hook event payload."""
-    if guard is None:
-        guard = GuardInterface()
-
     event_name = payload.get("hook_event_name", "")
     session_id = str(payload.get("session_id") or "default")
     state = _load_session_state(session_id, log_dir)
 
+    if guard is None:
+        guard = GuardInterface()
+        # Restore session state if resuming an active session across process invocations
+        task_desc = state.get("task_description", "")
+        plan_desc = state.get("proposed_plan", "")
+        if task_desc or plan_desc:
+            guard.on_plan_proposed(
+                task_description=task_desc,
+                proposed_plan=plan_desc,
+                metadata={"source": "workbuddy_hook", "session_id": session_id},
+            )
+            # Replay prior history steps to restore tracker, drift, and reflector state
+            replay_hist = []
+            for past_step in state.get("history", []):
+                guard.on_step(
+                    step_record=past_step,
+                    history=replay_hist,
+                    metadata={"source": "workbuddy_hook", "session_id": session_id, "in_replay": True},
+                )
+                replay_hist.append(past_step)
+
     # 1. USER PROMPT SUBMISSION (Initial Task and Plan Proposal)
     if event_name == "UserPromptSubmit":
         prompt = payload.get("prompt", "") or ""
+        plan = payload.get("plan", "") or payload.get("proposed_plan", "") or ""
+        if not plan and ("1." in prompt or "Plan:" in prompt or "\n-" in prompt):
+            plan = prompt
         state["task_description"] = prompt
+        state["proposed_plan"] = plan
         _save_session_state(state, log_dir)
 
         plan_res = guard.on_plan_proposed(
             task_description=prompt,
-            proposed_plan="",
+            proposed_plan=plan,
             metadata={"source": "workbuddy_hook", "session_id": session_id},
         )
 
@@ -171,6 +194,8 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         step_idx = state.get("step_counter", 0)
         state["step_counter"] = step_idx + 1
 
+        prior_history = list(state.get("history", []))
+
         step_record = {
             "step_index": step_idx,
             "reasoning": "",
@@ -178,7 +203,6 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
             "action_args": tool_input if isinstance(tool_input, dict) else {"raw": str(tool_input)},
             "tool_response": resp_str,
         }
-        state["history"].append(step_record)
 
         # Update recent actions tracker for loop detection
         signature = f"{tool_name}:{json.dumps(tool_input, sort_keys=True)}"
@@ -188,9 +212,22 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
 
         step_res = guard.on_step(
             step_record=step_record,
-            history=state["history"],
+            history=prior_history,
             metadata={"source": "workbuddy_hook", "session_id": session_id},
         )
+
+        state["history"].append(step_record)
+
+        match_det = step_res.get("match_details") or {}
+        cat = step_res.get("category") or match_det.get("category")
+        conf = step_res.get("confidence")
+        if conf is None:
+            conf = match_det.get("confidence", 0.0)
+        suggestions = step_res.get("suggestions")
+        if not suggestions and match_det.get("safe_alternative"):
+            suggestions = [match_det["safe_alternative"]]
+        elif not suggestions:
+            suggestions = []
 
         _append_session_log(session_id, {
             "type": "step",
@@ -198,10 +235,10 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
             "step_index": step_idx,
             "action_name": tool_name,
             "flagged": step_res.get("flagged", False),
-            "category": step_res.get("category"),
-            "confidence": step_res.get("confidence", 0.0),
+            "category": cat,
+            "confidence": conf,
             "warning": step_res.get("warning"),
-            "suggestions": step_res.get("suggestions", []),
+            "suggestions": suggestions,
             "timestamp": datetime.datetime.now().isoformat(),
         }, log_dir)
 
@@ -210,14 +247,12 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         # If flagged, alert the user and inject steer guidance into LLM's context window!
         if step_res.get("flagged"):
             warning = step_res.get("warning", "Potential issue detected")
-            cat = step_res.get("category", "drift")
-            conf = step_res.get("confidence", 0.0)
-            suggestions = step_res.get("suggestions", [])
+            cat_display = cat or "drift"
             sugg_str = f" Suggestion: {suggestions[0]}" if suggestions else ""
 
             sys.stderr.write(
                 f"\n\033[93m⚠️  [LONGHORIZON GUARD ALERT]\033[0m Step {step_idx} "
-                f"[{cat} conf={conf:.2f}]:\n    {warning}{sugg_str}\n\n"
+                f"[{cat_display} conf={conf:.2f}]:\n    {warning}{sugg_str}\n\n"
             )
             sys.stderr.flush()
 

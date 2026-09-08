@@ -1096,7 +1096,267 @@ class TestStatusCodeKeywordRegression:
         assert res.get("match_details") is None
 
 
+class TestGuardRuntimeEnhancements:
+    """Tests covering Critical and High findings: schema, subgoals, taxonomy, and root cause."""
 
+    def test_on_step_top_level_schema_contract(self, guard):
+        """Top-level schema must include category, confidence, and suggestions on on_step()."""
+        # Flagged step
+        step_flagged = {
+            "step_index": 0,
+            "reasoning": "Check 404 response.",
+            "action_name": "curl",
+            "action_args": {},
+            "tool_response": "HTTP 404 error: resource not found on remote server",
+        }
+        res_flagged = guard.on_step(step_flagged, history=[])
+        assert res_flagged["flagged"] is True
+        assert "category" in res_flagged
+        assert res_flagged["category"] == "external_error"
+        assert "confidence" in res_flagged
+        assert isinstance(res_flagged["confidence"], float)
+        assert "suggestions" in res_flagged
+        assert isinstance(res_flagged["suggestions"], list)
 
+        # Clean step
+        step_clean = {
+            "step_index": 1,
+            "reasoning": "Compute valid math.",
+            "action_name": "calc",
+            "action_args": {"expr": "1 + 1"},
+            "tool_response": "2",
+        }
+        res_clean = guard.on_step(step_clean, history=[])
+        assert res_clean["flagged"] is False
+        assert "category" in res_clean
+        assert res_clean["category"] is None
+        assert "confidence" in res_clean
+        assert res_clean["confidence"] == 0.0
+        assert "suggestions" in res_clean
+        assert res_clean["suggestions"] == []
 
+    def test_subgoal_boundary_mutates_tracker_state(self, guard):
+        """on_subgoal_boundary must mutate SubgoalTracker and advance active index."""
+        plan = "1. Install dependencies\n2. Run tests"
+        guard.on_plan_proposed(task_description="Setup project", proposed_plan=plan)
+
+        tracker = guard.subgoal_tracker
+        assert tracker is not None
+        assert tracker.active_subgoal.subgoal_id == "subgoal_001"
+
+        res = guard.on_subgoal_boundary(
+            subgoal_id="subgoal_001",
+            subgoal_status="completed",
+            metadata={"step_index": 1, "trigger_reason": "host_event"},
+        )
+        assert res["checkpoint_passed"] is True
+        assert res["next_subgoal"] == "subgoal_002"
+        assert tracker.subgoals[0].status == "completed"
+        assert tracker.active_subgoal.subgoal_id == "subgoal_002"
+
+    def test_reflection_derives_valid_taxonomy_category(self):
+        """_derive_error_type_from_reflection must map plan_deviation to planning_error."""
+        from longhorizon_guard.interface import _derive_error_type_from_reflection
+        
+        raw_refl = {
+            "detected_error_type": "plan_deviation",
+            "explanation": "Agent drifted from plan",
+        }
+        derived = _derive_error_type_from_reflection(raw_refl)
+        assert derived == "planning_error"
+        assert derived in DEFAULT_TAGS
+
+    def test_on_run_end_earliest_temporal_root_cause(self, guard):
+        """Earliest step error must be attributed as root cause over later tier errors."""
+        steps = [
+            {
+                "step_index": 0,
+                "reasoning": "Initial search",
+                "action_name": "search",
+                "action_args": {"q": "python"},
+                "tool_response": "results found",
+            },
+            {
+                "step_index": 1,
+                "reasoning": "Read documentation file",
+                "action_name": "read_doc",
+                "action_args": {"file": "index.md"},
+                "tool_response": "doc content",
+            },
+            {
+                "step_index": 2,
+                "reasoning": "Read documentation file again",
+                "action_name": "read_doc",
+                "action_args": {"file": "index.md"},
+                "tool_response": "doc content",
+            },
+            {
+                "step_index": 3,
+                "reasoning": "Read documentation file third time",
+                "action_name": "read_doc",
+                "action_args": {"file": "index.md"},
+                "tool_response": "doc content",
+            },
+            {
+                "step_index": 4,
+                "reasoning": "Now external error",
+                "action_name": "fetch",
+                "action_args": {},
+                "tool_response": "HTTP 404 error: resource not found",
+            },
+        ]
+
+        summary = guard.on_run_end(
+            metadata={"task": "test"},
+            trajectory={"steps": steps},
+        )
+        # Step 3 triggers action repetition (drift heuristic), Step 4 triggers pattern_match (Tier 1).
+        # Chronological precedence dictates Step 3 is earlier than Step 4!
+        assert summary["root_cause_step_index"] == 3
+        assert summary["root_cause_error_type"] == "memory_error"
+
+    def test_fail_open_false_raises_exception(self):
+        """When fail_open=False, exceptions inside hooks must re-raise (Finding 7)."""
+        cfg = GuardConfig(fail_open=False)
+        strict_guard = GuardInterface(config=cfg)
+
+        with patch.object(strict_guard._matcher, "match", side_effect=RuntimeError("strict failure")):
+            with pytest.raises(RuntimeError, match="strict failure"):
+                strict_guard.on_step(
+                    {"step_index": 0, "reasoning": "r", "action_name": "a", "action_args": {}},
+                    history=[],
+                )
+
+    def test_block_on_critical_controls_approval_and_execution(self):
+        """block_on_critical=True blocks on contradiction and critical drift (Finding 8)."""
+        cfg_blocking = GuardConfig(block_on_critical=True)
+        guard_block = GuardInterface(config=cfg_blocking)
+
+        # Plan contradiction with block_on_critical -> approved=False
+        contradiction_plan = "1. Book expensive luxury tickets"
+        res_plan = guard_block.on_plan_proposed("Find the cheapest flight options", contradiction_plan)
+        assert res_plan["flagged"] is True
+        assert res_plan["approved"] is False
+
+        # Non-blocking default -> approved remains True
+        guard_default = GuardInterface(config=GuardConfig(block_on_critical=False))
+        res_default = guard_default.on_plan_proposed("Find the cheapest flight options", contradiction_plan)
+        assert res_default["flagged"] is True
+        assert res_default["approved"] is True
+
+        # Critical step execution block
+        step_loop = {
+            "step_index": 3,
+            "reasoning": "reading",
+            "action_name": "read",
+            "action_args": {"file": "a.txt"},
+            "tool_response": "ok",
+        }
+        prior_hist = [
+            {"step_index": 0, "action_name": "read", "action_args": {"file": "a.txt"}},
+            {"step_index": 1, "action_name": "read", "action_args": {"file": "a.txt"}},
+            {"step_index": 2, "action_name": "read", "action_args": {"file": "a.txt"}},
+        ]
+        res_step_block = guard_block.on_step(step_loop, history=prior_hist)
+        assert res_step_block["flagged"] is True
+        assert res_step_block["continue_execution"] is False
+
+    def test_similarity_threshold_configured_and_confidence_calibrated(self):
+        """PatternMatcher receives similarity_threshold and calibrates confidence (Findings 7 & 11)."""
+        cfg = GuardConfig(similarity_threshold=0.88)
+        guard = GuardInterface(config=cfg)
+        assert guard._matcher._similarity_threshold == 0.88
+
+        # Verify context_length_error rule exists in keyword rules
+        rule_ids = [r.rule_id for r in guard._matcher._keyword_rules]
+        assert "context_length_exceeded" in rule_ids
+
+    def test_subgoal_success_keywords_tightened(self, guard):
+        """'you see' does not complete subgoal; 'not found' does not complete subgoal (Finding 10)."""
+        tracker = guard.subgoal_tracker
+        tracker.init_plan("Take the apple", "1. Open fridge\n2. Take apple")
+
+        # Step 1: Tool response with passive 'You see' -> must NOT complete
+        step_see = {
+            "step_index": 0,
+            "action_name": "look",
+            "tool_response": "You see a fridge and a chair.",
+        }
+        res_see = tracker.process_step(step_see, history=[])
+        assert res_see["transition_event"] is None
+        assert tracker.active_subgoal.subgoal_id == "subgoal_001"
+
+        # Step 2: Tool response with 'not found' -> must NOT complete
+        step_not_found = {
+            "step_index": 1,
+            "action_name": "search",
+            "tool_response": "File not found in system.",
+        }
+        res_nf = tracker.process_step(step_not_found, history=[step_see])
+        assert res_nf["transition_event"] is None
+        assert tracker.active_subgoal.subgoal_id == "subgoal_001"
+
+        # Step 3: Tool response with real success 'you open' -> completes
+        step_open = {
+            "step_index": 2,
+            "action_name": "open",
+            "tool_response": "You open the fridge door.",
+        }
+        res_open = tracker.process_step(step_open, history=[step_see, step_not_found])
+        assert res_open["transition_event"] is not None
+        assert res_open["transition_event"]["completed_status"] == "completed"
+        assert tracker.active_subgoal.subgoal_id == "subgoal_002"
+
+    def test_reflector_invalidation_respects_high_severity(self):
+        """Reflector only invalidates on high/critical drift or score >= 0.60 (Finding 12)."""
+        from longhorizon_guard.reflector.reflector import PlanReflector
+        refl = PlanReflector(step_interval=5)
+        refl.init_plan("Complete task", "1. Step 1\n2. Step 2")
+
+        sub_state = {"failed_subgoals_count": 0, "stalled_advanced_subgoals_count": 0}
+
+        # Medium drift score (0.50) without failed subgoals should NOT invalidate
+        med_drift = {"drift_detected": True, "severity_score": 0.50, "severity_level": "medium"}
+        res_med = refl.evaluate(
+            step_record={"step_index": 5},
+            history=[],
+            subgoal_state=sub_state,
+            drift_assessment=med_drift,
+            trigger_type="step_interval",
+        )
+        assert res_med.plan_still_valid is True
+        assert res_med.revision_suggested is False
+
+        # High drift score (0.65) / high severity level MUST invalidate on subsequent step interval
+        high_drift = {"drift_detected": True, "severity_score": 0.65, "severity_level": "high"}
+        res_high = refl.evaluate(
+            step_record={"step_index": 10},
+            history=[],
+            subgoal_state=sub_state,
+            drift_assessment=high_drift,
+            trigger_type="step_interval",
+        )
+        assert res_high.plan_still_valid is False
+        assert res_high.revision_suggested is True
+
+    def test_client_wrapper_plan_extraction(self):
+        """OpenAIClientWrapper extracts plan from user prompt (Finding 9)."""
+        from unittest.mock import MagicMock
+        from longhorizon_guard.integrations.client_wrapper import OpenAIClientWrapper
+
+        mock_client = MagicMock()
+        guard = GuardInterface()
+        wrapper = OpenAIClientWrapper(mock_client, guard=guard)
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Goal: Setup repository.\nPlan:\n1. Clone repo\n2. Run tests"},
+        ]
+        wrapper._process_messages_before_call(messages)
+
+        tracker = guard.subgoal_tracker
+        assert tracker is not None
+        assert tracker.is_fallback is False
+        assert len(tracker.subgoals) == 2
+        assert tracker.active_subgoal.subgoal_id == "subgoal_001"
 

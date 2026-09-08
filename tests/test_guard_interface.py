@@ -1037,6 +1037,65 @@ class TestStatusCodeKeywordRegression:
         assert r_500["flagged"] is False
         assert r_500["match_details"] is None
 
+    def test_tool_response_flags_planning_error_exhaustive_search(self, guard_no_patterns):
+        """Exhaustive search detected solely in tool_response must be flagged as planning_error."""
+        step = {
+            "step_index": 0,
+            "reasoning": "Proceed with task execution.",
+            "action_name": "next_step",
+            "action_args": {},
+            "tool_response": "Environment feedback: agent used exhaustive search, checking cabinet by cabinet with no informed strategy",
+        }
+        res = guard_no_patterns.on_step(step, history=[])
+        assert res["flagged"] is True
+        details = res.get("match_details")
+        assert details is not None
+        assert details["category"] == "planning_error"
+        assert details["rule_id"] == "planning_exhaustive_search"
+
+    def test_benign_tool_response_planning_keywords_not_flagged(self, guard):
+        """Benign search/cabinet text in tool_response lacking error co-occurrence must NOT flag."""
+        step = {
+            "step_index": 1,
+            "reasoning": "Query inventory database.",
+            "action_name": "query_items",
+            "action_args": {"target": "cabinet"},
+            "tool_response": "Search complete: found 10 items in cabinet inventory, sorted by id",
+        }
+        res = guard.on_step(step, history=[])
+        assert res["flagged"] is False
+        assert res.get("match_details") is None
+
+    def test_tool_response_flags_reflection_error(self, guard_no_patterns):
+        """Reflection error feedback present solely in tool_response must be flagged as reflection_error."""
+        step = {
+            "step_index": 2,
+            "reasoning": "Continue interacting with environment.",
+            "action_name": "interact",
+            "action_args": {},
+            "tool_response": "Feedback ignored: agent misinterpreted feedback from the environment and picked the wrong object instead of the correct one",
+        }
+        res = guard_no_patterns.on_step(step, history=[])
+        assert res["flagged"] is True
+        details = res.get("match_details")
+        assert details is not None
+        assert details["category"] == "reflection_error"
+        assert details["rule_id"] in ("reflection_wrong_object", "reflection_ignored_feedback")
+
+    def test_benign_tool_response_reflection_keywords_not_flagged(self, guard):
+        """Benign phrasing with 'instead of' in tool_response lacking error co-occurrence must NOT flag."""
+        step = {
+            "step_index": 3,
+            "reasoning": "Execute optimization benchmark.",
+            "action_name": "run_benchmark",
+            "action_args": {},
+            "tool_response": "Benchmark result: using set lookup instead of linear list scan improved runtime",
+        }
+        res = guard.on_step(step, history=[])
+        assert res["flagged"] is False
+        assert res.get("match_details") is None
+
+
 
 
 

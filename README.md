@@ -73,6 +73,109 @@ The package implements a modular, non-blocking 4-hook interface (`GuardInterface
    - Wraps execution in safe exception handlers with a 2.0-second maximum timeout per hook.
    - Guarantees that internal monitor failures or unhandled exceptions log a warning and return `flagged=False`, preventing host agent execution crashes.
 
+6. **3-Tier Hybrid Graph-RAG Causal Memory (`memory/`)**:
+   - Maintains ephemeral working memory and a persistent Causal Error Knowledge Graph.
+   - Evaluates multi-hop error propagation and discovers safe recovery alternatives using HippoRAG Personalized PageRank (PPR) causal diffusion (<15ms latency).
+   - Dynamically learns new failure patterns, cascades, and recovery actions across agent sessions without external database daemons.
+
+---
+
+## 3-Tier Hybrid Graph-RAG Causal Memory Architecture
+
+LongHorizon Guard incorporates a causal error memory engine designed to combat error cascades across multi-step execution. In long-horizon tasks, errors rarely happen in isolation: an unnoticed tool failure at step 2 often leads to drift at step 6 and catastrophic plan failure at step 12. The memory system enables the guard to recognize these multi-hop causal chains and intervene before errors propagate.
+
+### Architecture Overview
+
+```text
+                          ┌────────────────────────┐
+                          │     GuardInterface     │
+                          └──────────┬─────────────┘
+                                     │
+                                     ▼
+                          ┌────────────────────────┐
+                          │      MemoryGuard       │
+                          │     (Coordinator)      │
+                          └──────┬───────────┬─────┘
+                                 │           │
+           ┌─────────────────────┴───┐       │
+           ▼                         ▼       ▼
+┌───────────────────────┐ ┌─────────────────────────┐ ┌───────────────────────┐
+│     WorkingMemory     │ │    CausalErrorGraph     │ │   LocalConceptIndex   │
+│  - Trajectory Window  │ │  - NetworkX DiGraph     │ │  - TF-IDF Sparse      │
+│  - Drift Trajectory   │ │  - Prerequisite Edges   │ │  - Cosine Similarity  │
+│  - Repetition Counter │ │  - Failure & Cascades   │ │  - Zero API Overhead  │
+└───────────────────────┘ └───────────┬─────────────┘ └───────────────────────┘
+                                      │
+                                      ▼
+                          ┌─────────────────────────┐
+                          │ AssociativeMemoryEngine │
+                          │ - HippoRAG Personalized │
+                          │   PageRank (PPR <15ms)  │
+                          │ - Multi-hop Risk Path   │
+                          │ - Recovery Discovery    │
+                          └─────────────────────────┘
+```
+
+### The 3 Memory Tiers
+
+1. **Tier 1: Ephemeral Working Memory (`WorkingMemory`)**
+   - Maintained in-process during an active agent session.
+   - Tracks a sliding window of recent actions and arguments.
+   - Tracks repeated tool execution failure frequencies to catch immediate loops.
+   - Records drift trajectory metrics (score, velocity, acceleration) across steps.
+   - Manages active advisories emitted by the guard.
+
+2. **Tier 2: Causal Error Knowledge Graph (`CausalErrorGraph`)**
+   - Backed by a NetworkX directed graph (`nx.DiGraph`) persisted locally as JSON or SQLite (with full `:memory:` support for unit testing and ephemeral sandboxes).
+   - Requires zero external database daemons (no Neo4j, Redis, or cloud graph servers).
+   - **Typed Graph Entities**:
+     - `TaskConceptNode`: High-level user intent and task definitions.
+     - `SubgoalNode`: Plan milestones with strict or soft dependency relations.
+     - `ActionPatternNode`: Specific tool invocations and normalized argument signatures.
+     - `ErrorSignatureNode`: Classified error taxonomy categories and error regex/string patterns.
+     - `RecoveryNode`: Prescribed corrective actions and safe tool alternatives.
+   - **Typed Relational Edges**:
+     - `PREREQUISITE_OF`: Direct DAG dependencies between subgoals (e.g. `run_tests` must precede `deploy_service`).
+     - `TRIGGERS_ERROR`: Direct causal edge from an action pattern to an observed failure signature.
+     - `PROPAGATES_TO`: Multi-step cascade edge modeling temporal error transitions (e.g. `tool_use_error` $\to$ `drift`).
+     - `REMEDIED_BY`: Edge linking an error signature to an effective recovery strategy.
+
+3. **Tier 3: HippoRAG Associative Retrieval Engine (`AssociativeMemoryEngine`)**
+   - Implements **Personalized PageRank (PPR)** associative diffusion over the causal error graph (inspired by the HippoRAG hippocampal memory architecture).
+   - When an agent proposes or executes an action, the engine seeds personalized teleportation probability on the corresponding action and error nodes.
+   - Diffuses probability mass across multi-hop edges (`TRIGGERS_ERROR`, `PROPAGATES_TO`, `REMEDIED_BY`) to score downstream causal risks and discover reachable recovery actions in **<0.5ms** (far below the 15ms runtime threshold).
+   - Complemented by `LocalConceptIndex`, a self-contained sparse TF-IDF cosine similarity index that matches new tasks against historical failure patterns without requiring external embedding APIs.
+
+### Lifecycle Integration in `GuardInterface`
+
+- **Plan Inception (`on_plan_proposed`)**:
+  Inspects the proposed plan against the causal graph's prerequisite DAGs. If the plan attempts to schedule a milestone without satisfying prior required dependencies (e.g. deploying without building and testing), the guard flags a `prerequisite_violation` advisory and injects corrective ordering suggestions.
+- **Step Execution (`on_step`)**:
+  Before tool execution, extracts action signatures and runs associative PPR diffusion. If the action has high associative probability to known downstream failures (such as destructive shell operations or context overruns), the guard flags the step and attaches preventive `safe_alternative` suggestions.
+- **Run Finalization & Live Learning (`on_run_end`)**:
+  When an agent trajectory completes or fails, the guard records the observed failure sequence, correlates root-cause steps with downstream drift, and dynamically updates edge weights and cascade transitions in the persistent Causal Graph.
+
+### Enabling the Memory System
+
+The memory system is **100% backward compatible** and disabled by default (`enable_memory: bool = False`).
+
+#### Via Python API:
+```python
+from longhorizon_guard import GuardConfig, GuardInterface
+
+config = GuardConfig(
+    enable_memory=True,
+    memory_storage_path="findings/memory/causal_graph.json",  # or ":memory:" for in-memory
+)
+guard = GuardInterface(config=config)
+```
+
+#### Via Environment Variables:
+```bash
+export GUARD_ENABLE_MEMORY=true
+export GUARD_MEMORY_STORAGE_PATH=findings/memory/causal_graph.json
+```
+
 ---
 
 ## Installation

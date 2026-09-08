@@ -18,6 +18,8 @@ class GuardConfig:
     reflection_step_interval: int = 5
     fail_open: bool = True
     block_on_critical: bool = False
+    enable_memory: bool = False
+    memory_storage_path: Optional[str] = None
     provider: str = "gemini"
     model: str = "gemini-2.5-flash"
 
@@ -31,6 +33,8 @@ class GuardConfig:
             reflection_step_interval=int(os.getenv("GUARD_REFLECTION_INTERVAL", "5")),
             fail_open=os.getenv("GUARD_FAIL_OPEN", "true").lower() in ("true", "1", "yes"),
             block_on_critical=os.getenv("GUARD_BLOCK_ON_CRITICAL", "false").lower() in ("true", "1", "yes"),
+            enable_memory=os.getenv("GUARD_ENABLE_MEMORY", "false").lower() in ("true", "1", "yes"),
+            memory_storage_path=os.getenv("GUARD_MEMORY_STORAGE_PATH"),
             provider=os.getenv("GUARD_PROVIDER", "gemini"),
             model=os.getenv("GUARD_MODEL", "gemini-2.5-flash"),
         )

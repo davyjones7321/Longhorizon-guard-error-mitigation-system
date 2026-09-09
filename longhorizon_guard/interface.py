@@ -1050,6 +1050,7 @@ class GuardInterface:
         result: Dict[str, Any] = {
             "continue_execution": True,
             "flagged": False,
+            "flags": [],
             "drift_detected": False,
             "warning": None,
             "match_details": None,

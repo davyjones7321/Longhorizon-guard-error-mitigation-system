@@ -83,3 +83,22 @@ class TestMemoryGuardIntegration:
         assert mg is not None
         summary_g = mg.causal_graph.summary()
         assert summary_g["total_nodes"] > 10
+
+    def test_memory_flag_does_not_suppress_other_detection_layers(self):
+        """Regression test: verify memory flags do not cause KeyError or suppress matcher/drift/reflector."""
+        cfg = GuardConfig(enable_memory=True, memory_storage_path=":memory:", drift_threshold=0.01)
+        guard = GuardInterface(config=cfg)
+        guard.on_plan_proposed("task", "1. step a\n2. step b")
+
+        step_rec = {
+            "action_name": "bash",
+            "action_args": {"cmd": "rm -rf /"},
+            "tool_response": "Permission denied: rm: cannot remove '/'",
+            "reasoning": "trying again after previous failure, stuck in a loop, repeating same action",
+        }
+        res = guard.on_step(step_rec, history=[])
+
+        assert res.get("memory_flagged") is True
+        assert res.get("match_details") is not None
+        assert res.get("drift_assessment") is not None
+        assert res.get("reflection_result") is not None

@@ -883,8 +883,29 @@ class GuardInterface:
                 raise
             self._reflector = None  # type: ignore[assignment]
 
+        self.enable_memory: bool = getattr(config, "enable_memory", False)
+        if self.enable_memory:
+            try:
+                from longhorizon_guard.memory.memory_guard import MemoryGuard
+                self._memory_guard = MemoryGuard(
+                    storage_path=getattr(config, "memory_storage_path", None),
+                    auto_bootstrap=True,
+                )
+            except Exception:
+                logger.exception("MemoryGuard init failed — memory disabled")
+                if not self.fail_open:
+                    raise
+                self._memory_guard = None
+        else:
+            self._memory_guard = None
+
         self._live_steps_recorded: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         self._in_replay: bool = False
+
+    @property
+    def memory_guard(self) -> Optional[Any]:
+        """Return the active MemoryGuard instance if enabled."""
+        return self._memory_guard
 
     @property
     def subgoal_tracker(self) -> Optional[Any]:
@@ -967,6 +988,26 @@ class GuardInterface:
                     if match.safe_alternative:
                         result["suggestions"].append(match.safe_alternative)
 
+            # 4. Memory-augmented prerequisite and pattern check
+            if self._memory_guard is not None:
+                subgoals_list = []
+                if self._subgoal_tracker is not None:
+                    raw_sgs = getattr(self._subgoal_tracker, "_subgoals", None) or getattr(self._subgoal_tracker, "subgoals", [])
+                    for s in raw_sgs:
+                        subgoals_list.append({"subgoal_id": getattr(s, "subgoal_id", ""), "description": getattr(s, "description", "")})
+                mem_res = self._memory_guard.on_plan_proposed(
+                    task_description=task_description,
+                    proposed_plan=proposed_plan,
+                    declared_subgoals=subgoals_list,
+                    metadata=metadata,
+                )
+                if mem_res.get("flagged"):
+                    for flag in mem_res.get("flags", []):
+                        result["flags"].append(flag)
+                    for sugg in mem_res.get("suggestions", []):
+                        if sugg not in result["suggestions"]:
+                            result["suggestions"].append(sugg)
+
             if result["flags"]:
                 logger.info(
                     "on_plan_proposed flags run_id=%s count=%d",
@@ -1009,6 +1050,7 @@ class GuardInterface:
         result: Dict[str, Any] = {
             "continue_execution": True,
             "flagged": False,
+            "flags": [],
             "drift_detected": False,
             "warning": None,
             "match_details": None,
@@ -1023,6 +1065,22 @@ class GuardInterface:
                 result["subgoal_state"] = sub_res.get("state_payload")
                 if sub_res.get("transition_event"):
                     result["subgoal_transition"] = sub_res["transition_event"]
+
+            # Pre-step memory associative risk check
+            if self._memory_guard is not None and not getattr(self, "_in_replay", False):
+                mem_step = self._memory_guard.on_pre_step(step_record)
+                if mem_step.get("flagged"):
+                    result["memory_flagged"] = True
+                    result["memory_category"] = mem_step.get("category", "tool_use_error")
+                    result["memory_confidence"] = mem_step.get("confidence", 0.85)
+                    result["memory_suggestions"] = mem_step.get("suggestions", [])
+                    for m_flag in mem_step.get("flags", []):
+                        result["flags"].append(m_flag)
+                    if not result.get("warning") and mem_step.get("flags"):
+                        result["warning"] = mem_step["flags"][0]
+                    for m_sugg in mem_step.get("suggestions", []):
+                        if m_sugg not in result.setdefault("suggestions", []):
+                            result["suggestions"].append(m_sugg)
 
             run_id = (metadata or {}).get("run_id", "unknown")
             step_idx = step_record.get("step_index", -1)
@@ -1141,12 +1199,13 @@ class GuardInterface:
             if not self.fail_open:
                 raise
         finally:
-            # FIX C: flagged convenience field across all 3 sub-systems
+            # FIX C: flagged convenience field across all 4 sub-systems
             is_matched = result.get("match_details") is not None
             is_drift = bool(result.get("drift_detected"))
             refl = result.get("reflection_result")
             is_refl_revision = bool(refl and refl.get("revision_suggested"))
-            result["flagged"] = is_matched or is_drift or is_refl_revision
+            is_mem_flagged = bool(result.get("memory_flagged"))
+            result["flagged"] = is_matched or is_drift or is_refl_revision or is_mem_flagged
 
             # Top-level convenience schema fields for consumers (hook.py, proxy.py, client_wrapper.py)
             match_details = result.get("match_details")
@@ -1160,6 +1219,10 @@ class GuardInterface:
                     suggestions.append(match_details["safe_alternative"])
                 if refl and refl.get("revision_reasoning"):
                     suggestions.append(refl["revision_reasoning"])
+                if is_mem_flagged:
+                    for s in result.get("memory_suggestions", []):
+                        if s not in suggestions:
+                            suggestions.append(s)
                 result["suggestions"] = suggestions
             elif drift_info and drift_info.get("drift_detected"):
                 result["category"] = "drift"
@@ -1167,11 +1230,24 @@ class GuardInterface:
                 suggestions = []
                 if refl and refl.get("revision_reasoning"):
                     suggestions.append(refl["revision_reasoning"])
+                if is_mem_flagged:
+                    for s in result.get("memory_suggestions", []):
+                        if s not in suggestions:
+                            suggestions.append(s)
                 result["suggestions"] = suggestions
             elif is_refl_revision and refl:
                 result["category"] = "planning_error"
                 result["confidence"] = refl.get("confidence", 0.0)
-                result["suggestions"] = [refl["revision_reasoning"]] if refl.get("revision_reasoning") else []
+                suggestions = [refl["revision_reasoning"]] if refl.get("revision_reasoning") else []
+                if is_mem_flagged:
+                    for s in result.get("memory_suggestions", []):
+                        if s not in suggestions:
+                            suggestions.append(s)
+                result["suggestions"] = suggestions
+            elif is_mem_flagged:
+                result["category"] = result.get("memory_category", "tool_use_error")
+                result["confidence"] = result.get("memory_confidence", 0.85)
+                result["suggestions"] = list(result.get("memory_suggestions", []))
             else:
                 result["category"] = None
                 result["confidence"] = 0.0
@@ -1187,6 +1263,17 @@ class GuardInterface:
 
             if not getattr(self, "_in_replay", False):
                 self._live_steps_recorded.append((dict(step_record), dict(result)))
+                if self._memory_guard is not None:
+                    drift_score = drift_info.get("drift_score", 0.0) if drift_info else 0.0
+                    vel = drift_info.get("velocity", 0.0) if drift_info else 0.0
+                    acc = drift_info.get("acceleration", 0.0) if drift_info else 0.0
+                    self._memory_guard.on_post_step(
+                        step_record=step_record,
+                        step_result=result,
+                        drift_score=drift_score,
+                        velocity=vel,
+                        acceleration=acc,
+                    )
 
         return result
 
@@ -1452,5 +1539,10 @@ class GuardInterface:
                 raise
         finally:
             self._live_steps_recorded = []
+            if self._memory_guard is not None:
+                try:
+                    self._memory_guard.on_run_end(result)
+                except Exception as m_exc:
+                    logger.debug("Memory consolidation on_run_end failed: %s", m_exc)
 
         return result

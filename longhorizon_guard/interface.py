@@ -675,7 +675,7 @@ def _detect_action_repetition(
         if prev_key == cur_key:
             repeat_count += 1
 
-    if repeat_count >= 2:
+    if repeat_count >= 3:
         return MatchResult(
             matched=True,
             category="memory_error",

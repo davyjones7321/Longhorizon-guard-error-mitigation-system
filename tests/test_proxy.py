@@ -236,8 +236,8 @@ def test_proxy_action_repetition_flagging(proxy_server):
     """Verify that repeated identical actions trigger the on_flag callback."""
     session = SessionState(session_id="rep-test", guard=proxy_server["guard"], on_flag=lambda r: proxy_server["flags"].append(r))
 
-    # Simulate 3 identical failing bash commands
-    for i in range(3):
+    # Simulate 4 identical failing bash commands (3 repetitions in history)
+    for i in range(4):
         session._pending_tool_calls[f"tc_{i}"] = {
             "reasoning": "retrying command",
             "name": "bash",
@@ -247,8 +247,8 @@ def test_proxy_action_repetition_flagging(proxy_server):
             {"role": "tool", "tool_call_id": f"tc_{i}", "name": "bash", "content": "Error: exit code 1"}
         ])
 
-    # 3 repetitions must trigger action repetition detector
-    assert len(session.history) == 3
+    # 3 repetitions in history must trigger action repetition detector
+    assert len(session.history) == 4
     assert len(proxy_server["flags"]) >= 1
     flagged = proxy_server["flags"][-1]
     assert flagged["flagged"] is True

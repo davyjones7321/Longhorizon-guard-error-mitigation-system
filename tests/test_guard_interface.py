@@ -389,6 +389,32 @@ class TestStructuralRepetition:
         result = _detect_action_repetition(current, history)
         assert result is None
 
+    def test_repetition_threshold_requires_three_occurrences(self):
+        """2 repeated actions in history must NOT trigger; 3 repeated actions MUST trigger."""
+        current = {
+            "step_index": 4,
+            "action_name": "bash",
+            "action_args": {"cmd": "ls"},
+        }
+        # 2 identical actions in history -> repeat_count == 2 -> should NOT trigger
+        two_history = [
+            {"action_name": "bash", "action_args": {"cmd": "ls"}},
+            {"action_name": "bash", "action_args": {"cmd": "ls"}},
+        ]
+        assert _detect_action_repetition(current, two_history) is None
+
+        # 3 identical actions in history -> repeat_count == 3 -> MUST trigger
+        three_history = [
+            {"action_name": "bash", "action_args": {"cmd": "ls"}},
+            {"action_name": "bash", "action_args": {"cmd": "ls"}},
+            {"action_name": "bash", "action_args": {"cmd": "ls"}},
+        ]
+        res = _detect_action_repetition(current, three_history)
+        assert res is not None
+        assert res.matched is True
+        assert res.rule_id == "structural_action_repetition"
+        assert res.category == "memory_error"
+
 
 # =========================================================================
 # Test (g): Structural heuristic — 'Nothing happens' loop
@@ -1171,10 +1197,10 @@ class TestGuardRuntimeEnhancements:
         steps = [
             {
                 "step_index": 0,
-                "reasoning": "Initial search",
-                "action_name": "search",
-                "action_args": {"q": "python"},
-                "tool_response": "results found",
+                "reasoning": "Initial doc read",
+                "action_name": "read_doc",
+                "action_args": {"file": "index.md"},
+                "tool_response": "doc content",
             },
             {
                 "step_index": 1,

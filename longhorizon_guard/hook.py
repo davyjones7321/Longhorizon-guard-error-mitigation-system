@@ -47,6 +47,8 @@ def _load_session_state(session_id: str, log_dir: str) -> Dict[str, Any]:
         "proposed_plan": "",
         "history": [],
         "recent_actions": [],
+        "halt_next_tool": False,
+        "halt_reason": "",
         "created_at": datetime.datetime.now().isoformat(),
     }
 
@@ -142,6 +144,33 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         tool_name = payload.get("tool_name", "tool")
         tool_input = payload.get("tool_input", {})
         recent_actions = state.get("recent_actions", [])
+
+        # Check for one-shot halt triggered by critical guard flag on previous step
+        if state.get("halt_next_tool"):
+            halt_reason = state.get("halt_reason") or "Critical guard intervention halted execution"
+            state["halt_next_tool"] = False
+            state["halt_reason"] = ""
+            _save_session_state(state, log_dir)
+
+            sys.stderr.write(f"\n\033[91m🛑  [LONGHORIZON GUARD BLOCKED]\033[0m {halt_reason}\n\n")
+            sys.stderr.flush()
+
+            _append_session_log(session_id, {
+                "type": "block",
+                "session_id": session_id,
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "reason": halt_reason,
+                "timestamp": datetime.datetime.now().isoformat(),
+            }, log_dir)
+
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": halt_reason,
+                }
+            }
 
         # Check for repeated identical actions in a loop (e.g. failing command 3+ times)
         action_signature = f"{tool_name}:{json.dumps(tool_input, sort_keys=True)}"
@@ -241,6 +270,13 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
             "suggestions": suggestions,
             "timestamp": datetime.datetime.now().isoformat(),
         }, log_dir)
+
+        # Check if guard halted execution on critical flag
+        if step_res.get("continue_execution") is False:
+            state["halt_next_tool"] = True
+            cat_str = cat or "critical"
+            warn_str = step_res.get("warning") or "Critical guard intervention"
+            state["halt_reason"] = f"Critical flag on step {step_idx} [{cat_str}]: {warn_str}"
 
         _save_session_state(state, log_dir)
 

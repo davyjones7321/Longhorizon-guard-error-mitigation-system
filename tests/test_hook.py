@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import MagicMock
 
 from longhorizon_guard.hook import handle_hook
 
@@ -165,7 +166,7 @@ class TestHookIntegration(unittest.TestCase):
         self.assertTrue(len(saved_state.get("proposed_plan", "")) >= 2)
 
     def test_history_repetition_exact_threshold(self):
-        """Action repetition heuristic must not self-match; triggers on 3rd identical action, not 2nd."""
+        """Action repetition heuristic must not self-match; triggers on 4th identical action (3 in history), not 3rd."""
         session_id = "test-session-exact-rep"
         tool_name = "Read"
         tool_input = {"path": "config.yaml"}
@@ -191,7 +192,7 @@ class TestHookIntegration(unittest.TestCase):
         }, log_dir=self.test_dir)
         self.assertTrue(r2.get("continue"))
 
-        # Step 3: 3rd time action executes -> prior history has 2 instances -> triggers repetition flag!
+        # Step 3: 3rd time action executes -> prior history has 2 instances -> should NOT flag (threshold is 3)
         r3 = handle_hook({
             "session_id": session_id,
             "hook_event_name": "PostToolUse",
@@ -199,9 +200,119 @@ class TestHookIntegration(unittest.TestCase):
             "tool_input": tool_input,
             "tool_response": resp,
         }, log_dir=self.test_dir)
-        self.assertIn("hookSpecificOutput", r3)
-        self.assertIn("additionalContext", r3["hookSpecificOutput"])
-        self.assertIn("repeated 2 times", r3["hookSpecificOutput"]["additionalContext"].lower())
+        self.assertTrue(r3.get("continue"))
+
+        # Step 4: 4th time action executes -> prior history has 3 instances -> triggers repetition flag!
+        r4 = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_response": resp,
+        }, log_dir=self.test_dir)
+        self.assertIn("hookSpecificOutput", r4)
+        self.assertIn("additionalContext", r4["hookSpecificOutput"])
+        self.assertIn("repeated 3 times", r4["hookSpecificOutput"]["additionalContext"].lower())
+
+    def test_one_shot_halt_blocks_next_pre_tool_use_and_clears(self):
+        """With block_on_critical=True, a step with continue_execution=False denies next PreToolUse and clears."""
+        session_id = "test-session-one-shot"
+        mock_guard = MagicMock()
+        mock_guard.block_on_critical = True
+        mock_guard.on_step.return_value = {
+            "flagged": True,
+            "category": "drift",
+            "confidence": 0.95,
+            "warning": "Critical drift detected",
+            "continue_execution": False,
+            "suggestions": ["Stop drift"],
+        }
+
+        # 1. PostToolUse produces continue_execution=False
+        post_resp = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+            "tool_response": "error",
+        }, guard=mock_guard, log_dir=self.test_dir)
+        self.assertIn("hookSpecificOutput", post_resp)
+
+        # 2. Immediately following PreToolUse MUST be denied
+        pre_resp1 = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        }, log_dir=self.test_dir)
+        self.assertIn("hookSpecificOutput", pre_resp1)
+        self.assertEqual(pre_resp1["hookSpecificOutput"].get("permissionDecision"), "deny")
+        self.assertIn("Critical flag on step 0 [drift]", pre_resp1["hookSpecificOutput"].get("permissionDecisionReason", ""))
+
+        # 3. Third event (another PreToolUse, unrelated tool) MUST NOT be denied (one-shot cleared)
+        pre_resp2 = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"path": "app.py"},
+        }, log_dir=self.test_dir)
+        self.assertTrue(pre_resp2.get("continue"))
+        self.assertNotIn("hookSpecificOutput", pre_resp2)
+
+    def test_one_shot_halt_with_real_guard_end_to_end(self):
+        """End-to-end one-shot halt verification with real GuardInterface and GUARD_BLOCK_ON_CRITICAL=true."""
+        session_id = "test-session-e2e-halt"
+        old_val = os.environ.get("GUARD_BLOCK_ON_CRITICAL")
+        os.environ["GUARD_BLOCK_ON_CRITICAL"] = "true"
+        try:
+            tool_name = "Bash"
+            tool_input = {"command": "curl http://offline-host"}
+            resp = "curl: (7) Failed to connect to offline-host"
+
+            # Execute 3 times to build history
+            for _ in range(3):
+                handle_hook({
+                    "session_id": session_id,
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "tool_response": resp,
+                }, log_dir=self.test_dir)
+
+            # 4th execution triggers structural_action_repetition -> continue_execution=False
+            post4 = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PostToolUse",
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "tool_response": resp,
+            }, log_dir=self.test_dir)
+            self.assertIn("hookSpecificOutput", post4)
+
+            # Next PreToolUse MUST be denied
+            pre_denied = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl http://different-host"},
+            }, log_dir=self.test_dir)
+            self.assertIn("hookSpecificOutput", pre_denied)
+            self.assertEqual(pre_denied["hookSpecificOutput"].get("permissionDecision"), "deny")
+
+            # Subsequent PreToolUse MUST NOT be denied (one-shot cleared)
+            pre_allowed = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+                "tool_input": {"path": "config.yaml"},
+            }, log_dir=self.test_dir)
+            self.assertTrue(pre_allowed.get("continue"))
+            self.assertNotIn("hookSpecificOutput", pre_allowed)
+        finally:
+            if old_val is not None:
+                os.environ["GUARD_BLOCK_ON_CRITICAL"] = old_val
+            else:
+                os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
 
     def test_post_tool_use_steer_contains_category_and_suggestions(self):
         """PostToolUse alert and log must contain top-level category and confidence."""

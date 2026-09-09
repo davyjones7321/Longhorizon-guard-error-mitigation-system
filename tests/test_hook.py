@@ -314,6 +314,52 @@ class TestHookIntegration(unittest.TestCase):
             else:
                 os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
 
+    def test_one_shot_halt_blocks_pre_tool_use_on_rejected_plan_and_clears(self):
+        """With block_on_critical=True, a rejected plan sets halt_next_tool and denies next PreToolUse once."""
+        session_id = "test-session-plan-reject"
+        old_val = os.environ.get("GUARD_BLOCK_ON_CRITICAL")
+        os.environ["GUARD_BLOCK_ON_CRITICAL"] = "true"
+        try:
+            prompt = "Find the cheapest flight options"
+            plan = "1. Book expensive luxury tickets"
+            prompt_resp = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": prompt,
+                "plan": plan,
+            }, log_dir=self.test_dir)
+            self.assertTrue(prompt_resp.get("continue"))
+
+            # Immediately following PreToolUse MUST be denied
+            pre_resp1 = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://luxury-flights.example.com"},
+            }, log_dir=self.test_dir)
+
+            self.assertIn("hookSpecificOutput", pre_resp1)
+            output = pre_resp1["hookSpecificOutput"]
+            self.assertEqual(output.get("permissionDecision"), "deny")
+            reason = output.get("permissionDecisionReason", "")
+            self.assertIn("Plan rejected", reason)
+            self.assertIn("contradiction", reason.lower())
+
+            # Subsequent PreToolUse MUST NOT be denied (one-shot cleared)
+            pre_resp2 = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://budget-flights.example.com"},
+            }, log_dir=self.test_dir)
+            self.assertTrue(pre_resp2.get("continue"))
+            self.assertNotIn("hookSpecificOutput", pre_resp2)
+        finally:
+            if old_val is not None:
+                os.environ["GUARD_BLOCK_ON_CRITICAL"] = old_val
+            else:
+                os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
+
     def test_post_tool_use_steer_contains_category_and_suggestions(self):
         """PostToolUse alert and log must contain top-level category and confidence."""
         session_id = "test-session-schema"

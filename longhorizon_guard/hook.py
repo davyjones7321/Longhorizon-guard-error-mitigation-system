@@ -121,6 +121,17 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
             metadata={"source": "workbuddy_hook", "session_id": session_id},
         )
 
+        # Check if guard rejected the plan
+        if plan_res.get("approved") is False:
+            state["halt_next_tool"] = True
+            flags = plan_res.get("flags") or []
+            flags_str = "; ".join(flags) if flags else "Plan failed guard validation policy"
+            suggs = plan_res.get("suggestions") or []
+            sugg_str = f" Suggestion: {suggs[0]}" if suggs else ""
+            state["halt_reason"] = f"Plan rejected: {flags_str}.{sugg_str}".strip()
+
+        _save_session_state(state, log_dir)
+
         _append_session_log(session_id, {
             "type": "plan",
             "session_id": session_id,

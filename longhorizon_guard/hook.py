@@ -19,6 +19,12 @@ if repo_root not in sys.path:
 
 from longhorizon_guard.interface import GuardInterface
 from longhorizon_guard.storage.adapters.antigravity_session import sanitize_data
+from longhorizon_guard.subgoals.tracker import (
+    parse_plan_subgoals,
+    _NUMBERED_PATTERN,
+    _BULLET_PATTERN,
+    _TRANSITION_WORDS_PATTERN,
+)
 
 logger = logging.getLogger("longhorizon_guard.hook")
 DEFAULT_HOOK_LOG_DIR = os.path.join(repo_root, "findings", "hook_sessions")
@@ -36,7 +42,10 @@ def _load_session_state(session_id: str, log_dir: str) -> Dict[str, Any]:
     if os.path.exists(state_file):
         try:
             with open(state_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                state = json.load(f)
+                state.setdefault("phase_check_pending", False)
+                state.setdefault("transcript_offset", 0)
+                return state
         except Exception as exc:
             logger.debug("Failed to load state file %s: %s", state_file, exc)
 
@@ -49,6 +58,8 @@ def _load_session_state(session_id: str, log_dir: str) -> Dict[str, Any]:
         "recent_actions": [],
         "halt_next_tool": False,
         "halt_reason": "",
+        "phase_check_pending": False,
+        "transcript_offset": 0,
         "created_at": datetime.datetime.now().isoformat(),
     }
 
@@ -76,6 +87,154 @@ def _append_session_log(session_id: str, entry: Dict[str, Any], log_dir: str) ->
             f.write(json.dumps(cleaned_entry) + "\n")
     except Exception as exc:
         logger.debug("Failed to write to session log: %s", exc)
+
+
+def _apply_plan_rejection(state: Dict[str, Any], plan_res: Dict[str, Any]) -> None:
+    """Set halt_next_tool and halt_reason on state according to plan rejection result."""
+    state["halt_next_tool"] = True
+    flags = plan_res.get("flags") or []
+    flags_str = "; ".join(flags) if flags else "Plan failed guard validation policy"
+    suggs = plan_res.get("suggestions") or []
+    sugg_str = f" Suggestion: {suggs[0]}" if suggs else ""
+    state["halt_reason"] = f"Plan rejected: {flags_str}.{sugg_str}".strip()
+
+
+def _is_substantive_text(s: str) -> bool:
+    """Determine if a text snippet has substantive content beyond short greetings/acknowledgments."""
+    cleaned = s.strip()
+    if len(cleaned) < 15:
+        return False
+    words = [w for w in cleaned.split() if w]
+    if len(words) < 3:
+        return False
+    lower = cleaned.lower().rstrip(".!;,")
+    if lower in ("done", "ok", "okay", "sure", "acknowledged", "understood", "will do", "working on it", "got it", "i will start now"):
+        return False
+    return True
+
+
+def _extract_recent_plan_text(chunk: str) -> Optional[str]:
+    """Find the most recent real assistant text block or thinking block from a transcript chunk.
+
+    Walks backward from the end, skips low-content messages, falls back to thinking-block content
+    if present, and returns None if nothing substantive is found.
+    Wrapped in broad try/except to fail open on any schema surprises.
+    """
+    if not chunk or not chunk.strip():
+        return None
+
+    try:
+        lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+        if not lines:
+            return None
+
+        for line_str in reversed(lines):
+            try:
+                item = json.loads(line_str)
+            except Exception:
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            item_type = str(item.get("type", "")).lower()
+            role = str(item.get("role", "")).lower()
+
+            is_assistant = False
+            if role == "assistant" or item_type == "assistant":
+                is_assistant = True
+            elif item_type == "message" and role == "assistant":
+                is_assistant = True
+            elif isinstance(item.get("message"), dict) and str(item["message"].get("role", "")).lower() == "assistant":
+                is_assistant = True
+
+            is_reasoning = (item_type in ("reasoning", "thinking"))
+
+            if not is_assistant and not is_reasoning:
+                continue
+
+            text_candidates: List[str] = []
+            thinking_candidates: List[str] = []
+
+            # 1. Content field extraction
+            content = item.get("content")
+            if content is None and isinstance(item.get("message"), dict):
+                content = item["message"].get("content")
+
+            if isinstance(content, str) and content.strip():
+                if is_reasoning:
+                    thinking_candidates.append(content.strip())
+                else:
+                    text_candidates.append(content.strip())
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, str) and block.strip():
+                        if is_reasoning:
+                            thinking_candidates.append(block.strip())
+                        else:
+                            text_candidates.append(block.strip())
+                    elif isinstance(block, dict):
+                        btype = str(block.get("type", "")).lower()
+                        btext = block.get("text") or block.get("content") or ""
+                        if isinstance(btext, str) and btext.strip():
+                            if btype in ("thinking", "reasoning", "reasoning_text"):
+                                thinking_candidates.append(btext.strip())
+                            elif btype in ("text", "output_text") or not btype:
+                                text_candidates.append(btext.strip())
+                        bthinking = block.get("thinking")
+                        if isinstance(bthinking, str) and bthinking.strip():
+                            thinking_candidates.append(bthinking.strip())
+
+            # 2. Raw content field (WorkBuddy/Claude Code reasoning block)
+            raw_content = item.get("rawContent") or item.get("raw_content")
+            if isinstance(raw_content, str) and raw_content.strip():
+                thinking_candidates.append(raw_content.strip())
+            elif isinstance(raw_content, list):
+                for block in raw_content:
+                    if isinstance(block, str) and block.strip():
+                        thinking_candidates.append(block.strip())
+                    elif isinstance(block, dict):
+                        t = block.get("text") or block.get("content") or block.get("thinking")
+                        if isinstance(t, str) and t.strip():
+                            thinking_candidates.append(t.strip())
+
+            # 3. Direct text or thinking attributes
+            direct_text = item.get("text")
+            if isinstance(direct_text, str) and direct_text.strip():
+                text_candidates.append(direct_text.strip())
+            direct_thinking = item.get("thinking")
+            if isinstance(direct_thinking, str) and direct_thinking.strip():
+                thinking_candidates.append(direct_thinking.strip())
+
+            combined_text = "\n".join(text_candidates).strip()
+            combined_thinking = "\n".join(thinking_candidates).strip()
+
+            if combined_text and _is_substantive_text(combined_text):
+                return combined_text
+            elif combined_thinking and _is_substantive_text(combined_thinking):
+                return combined_thinking
+
+    except Exception as exc:
+        logger.debug("Failed extracting assistant plan text from transcript chunk: %s", exc)
+        return None
+
+    return None
+
+
+def _is_plan_shaped(text: str) -> bool:
+    """Check if extracted text is structurally plan-shaped (numbered list, bullets, or transition words)."""
+    try:
+        subgoals, is_fallback = parse_plan_subgoals(text)
+        if is_fallback:
+            return False
+        return bool(
+            len(_NUMBERED_PATTERN.findall(text)) >= 2
+            or len(_BULLET_PATTERN.findall(text)) >= 2
+            or len(_TRANSITION_WORDS_PATTERN.findall(text)) >= 2
+        )
+    except Exception as exc:
+        logger.debug("Failed checking if text is plan-shaped: %s", exc)
+        return False
 
 
 def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None, log_dir: str = DEFAULT_HOOK_LOG_DIR) -> Dict[str, Any]:
@@ -123,12 +282,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
 
         # Check if guard rejected the plan
         if plan_res.get("approved") is False:
-            state["halt_next_tool"] = True
-            flags = plan_res.get("flags") or []
-            flags_str = "; ".join(flags) if flags else "Plan failed guard validation policy"
-            suggs = plan_res.get("suggestions") or []
-            sugg_str = f" Suggestion: {suggs[0]}" if suggs else ""
-            state["halt_reason"] = f"Plan rejected: {flags_str}.{sugg_str}".strip()
+            _apply_plan_rejection(state, plan_res)
 
         _save_session_state(state, log_dir)
 
@@ -156,7 +310,49 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         tool_input = payload.get("tool_input", {})
         recent_actions = state.get("recent_actions", [])
 
-        # Check for one-shot halt triggered by critical guard flag on previous step
+        # Check if a phase boundary occurred and a phase plan check is pending
+        if state.get("phase_check_pending"):
+            state["phase_check_pending"] = False
+            transcript_path = payload.get("transcript_path")
+            if transcript_path and isinstance(transcript_path, str) and os.path.isfile(transcript_path):
+                try:
+                    offset = state.get("transcript_offset", 0)
+                    file_size = os.path.getsize(transcript_path)
+                    if offset > file_size:
+                        offset = 0
+
+                    with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(offset)
+                        chunk = f.read()
+                        state["transcript_offset"] = f.tell()
+
+                    extracted_text = _extract_recent_plan_text(chunk)
+                    if extracted_text and _is_plan_shaped(extracted_text):
+                        plan_res = guard.on_plan_proposed(
+                            task_description=state.get("task_description", ""),
+                            proposed_plan=extracted_text,
+                            metadata={"source": "workbuddy_hook", "session_id": session_id, "phase": True},
+                        )
+                        if plan_res.get("approved") is False:
+                            _apply_plan_rejection(state, plan_res)
+
+                        _append_session_log(session_id, {
+                            "type": "plan",
+                            "session_id": session_id,
+                            "task_description": state.get("task_description", ""),
+                            "proposed_plan": extracted_text,
+                            "approved": plan_res.get("approved", True),
+                            "flags": plan_res.get("flags", []),
+                            "suggestions": plan_res.get("suggestions", []),
+                            "phase": True,
+                            "timestamp": datetime.datetime.now().isoformat(),
+                        }, log_dir)
+                except Exception as exc:
+                    logger.debug("Failed processing transcript for phase critique: %s", exc)
+
+            _save_session_state(state, log_dir)
+
+        # Check for one-shot halt triggered by critical guard flag or plan rejection
         if state.get("halt_next_tool"):
             halt_reason = state.get("halt_reason") or "Critical guard intervention halted execution"
             state["halt_next_tool"] = False
@@ -257,6 +453,10 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         )
 
         state["history"].append(step_record)
+
+        # Check if a subgoal transition occurred (new phase boundary)
+        if step_res.get("subgoal_transition"):
+            state["phase_check_pending"] = True
 
         match_det = step_res.get("match_details") or {}
         cat = step_res.get("category") or match_det.get("category")

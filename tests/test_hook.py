@@ -384,6 +384,331 @@ class TestHookIntegration(unittest.TestCase):
         self.assertIsInstance(step_entry["confidence"], float)
         self.assertIsInstance(step_entry["suggestions"], list)
 
+    def test_phase_plan_critique_denies_contradictory_plan_and_clears(self):
+        """At subgoal boundary, assistant plan in transcript with contradiction is rejected and denies immediate PreToolUse."""
+        session_id = "test-session-phase-critique-reject"
+        old_val = os.environ.get("GUARD_BLOCK_ON_CRITICAL")
+        os.environ["GUARD_BLOCK_ON_CRITICAL"] = "true"
+        try:
+            # 1. Establish initial task
+            handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Find the cheapest flight options",
+                "plan": "1. Search budget airlines\n2. Filter cheapest prices",
+            }, log_dir=self.test_dir)
+
+            # 2. Write synthetic transcript with contradictory plan from assistant
+            transcript_path = os.path.join(self.test_dir, "phase_transcript.jsonl")
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "1. Book expensive luxury tickets\n2. Enjoy first class lounge"
+                        }
+                    ]
+                }) + "\n")
+
+            # 3. PostToolUse with trigger returning subgoal_transition=True
+            mock_guard = MagicMock()
+            mock_guard.block_on_critical = True
+            mock_guard.on_step.return_value = {
+                "flagged": False,
+                "category": None,
+                "confidence": 0.0,
+                "warning": None,
+                "continue_execution": True,
+                "subgoal_transition": "subgoal_001_completed",
+            }
+
+            post_resp = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://budget-search.example.com"},
+                "tool_response": "results found",
+            }, guard=mock_guard, log_dir=self.test_dir)
+            self.assertTrue(post_resp.get("continue"))
+
+            # Verify phase_check_pending was set in session state
+            state_path = os.path.join(self.test_dir, f"_state_{session_id}.json")
+            with open(state_path, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+            self.assertTrue(state_data.get("phase_check_pending"))
+
+            # 4. Next PreToolUse provides transcript_path and uses real guard (guard=None)
+            pre_denied = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://luxury-tickets.example.com"},
+                "transcript_path": transcript_path,
+            }, guard=None, log_dir=self.test_dir)
+
+            self.assertIn("hookSpecificOutput", pre_denied)
+            output = pre_denied["hookSpecificOutput"]
+            self.assertEqual(output.get("permissionDecision"), "deny")
+            reason = output.get("permissionDecisionReason", "")
+            self.assertIn("Plan rejected", reason)
+            self.assertIn("contradiction", reason.lower())
+
+            # Verify state: phase_check_pending is cleared, halt_next_tool was one-shot cleared
+            with open(state_path, "r", encoding="utf-8") as f:
+                state_data2 = json.load(f)
+            self.assertFalse(state_data2.get("phase_check_pending"))
+            self.assertFalse(state_data2.get("halt_next_tool"))
+
+            # 5. Subsequent PreToolUse is allowed (one-shot cleared)
+            pre_allowed = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://budget-search.example.com"},
+                "transcript_path": transcript_path,
+            }, guard=None, log_dir=self.test_dir)
+            self.assertTrue(pre_allowed.get("continue"))
+            self.assertNotIn("hookSpecificOutput", pre_allowed)
+        finally:
+            if old_val is not None:
+                os.environ["GUARD_BLOCK_ON_CRITICAL"] = old_val
+            else:
+                os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
+
+    def test_phase_plan_critique_skips_non_plan_prose(self):
+        """Plain prose assistant message without list structure does not trigger critique or halt."""
+        session_id = "test-session-phase-prose"
+        old_val = os.environ.get("GUARD_BLOCK_ON_CRITICAL")
+        os.environ["GUARD_BLOCK_ON_CRITICAL"] = "true"
+        try:
+            handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Find the cheapest flight options",
+            }, log_dir=self.test_dir)
+
+            transcript_path = os.path.join(self.test_dir, "prose_transcript.jsonl")
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I have inspected the previous step output and everything is running as expected."
+                        }
+                    ]
+                }) + "\n")
+
+            mock_guard = MagicMock()
+            mock_guard.on_step.return_value = {
+                "flagged": False,
+                "continue_execution": True,
+                "subgoal_transition": "subgoal_001_completed",
+            }
+
+            handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_response": "done",
+            }, guard=mock_guard, log_dir=self.test_dir)
+
+            # PreToolUse with transcript containing plain prose
+            pre_resp = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://test.example.com"},
+                "transcript_path": transcript_path,
+            }, guard=None, log_dir=self.test_dir)
+
+            self.assertTrue(pre_resp.get("continue"))
+            self.assertNotIn("hookSpecificOutput", pre_resp)
+
+            # State check: not halted
+            state_path = os.path.join(self.test_dir, f"_state_{session_id}.json")
+            with open(state_path, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+            self.assertFalse(state_data.get("halt_next_tool"))
+            self.assertFalse(state_data.get("phase_check_pending"))
+        finally:
+            if old_val is not None:
+                os.environ["GUARD_BLOCK_ON_CRITICAL"] = old_val
+            else:
+                os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
+
+    def test_phase_plan_critique_fails_open_on_missing_or_null_transcript(self):
+        """Missing or unreadable transcript_path fails open cleanly without crash or denial."""
+        session_id = "test-session-phase-fail-open"
+        mock_guard = MagicMock()
+        mock_guard.on_step.return_value = {
+            "flagged": False,
+            "continue_execution": True,
+            "subgoal_transition": "subgoal_001_completed",
+        }
+
+        # Case A: Missing transcript_path
+        handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": "done",
+        }, guard=mock_guard, log_dir=self.test_dir)
+
+        resp_missing = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"path": "file.txt"},
+        }, log_dir=self.test_dir)
+        self.assertTrue(resp_missing.get("continue"))
+        self.assertNotIn("hookSpecificOutput", resp_missing)
+
+        # Case B: transcript_path is None
+        handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": "done",
+        }, guard=mock_guard, log_dir=self.test_dir)
+
+        resp_none = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"path": "file.txt"},
+            "transcript_path": None,
+        }, log_dir=self.test_dir)
+        self.assertTrue(resp_none.get("continue"))
+        self.assertNotIn("hookSpecificOutput", resp_none)
+
+        # Case C: Non-existent transcript_path
+        handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response": "done",
+        }, guard=mock_guard, log_dir=self.test_dir)
+
+        resp_notfound = handle_hook({
+            "session_id": session_id,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"path": "file.txt"},
+            "transcript_path": os.path.join(self.test_dir, "nonexistent.jsonl"),
+        }, log_dir=self.test_dir)
+        self.assertTrue(resp_notfound.get("continue"))
+        self.assertNotIn("hookSpecificOutput", resp_notfound)
+
+    def test_phase_plan_critique_transcript_offset_advances(self):
+        """transcript_offset advances to EOF position so a subsequent phase check only processes new content."""
+        session_id = "test-session-offset-advance"
+        old_val = os.environ.get("GUARD_BLOCK_ON_CRITICAL")
+        os.environ["GUARD_BLOCK_ON_CRITICAL"] = "true"
+        try:
+            handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Find the cheapest flight options",
+            }, log_dir=self.test_dir)
+
+            transcript_path = os.path.join(self.test_dir, "offset_transcript.jsonl")
+            # Chunk 1: Has a plan that does NOT contradict (approved)
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "1. Search budget airlines\n2. Pick the cheapest option"
+                        }
+                    ]
+                }) + "\n")
+
+            mock_guard = MagicMock()
+            mock_guard.on_step.return_value = {
+                "flagged": False,
+                "continue_execution": True,
+                "subgoal_transition": "subgoal_001_completed",
+            }
+
+            # Phase 1 trigger
+            handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "step1"},
+                "tool_response": "done",
+            }, guard=mock_guard, log_dir=self.test_dir)
+
+            # Phase 1 PreToolUse processes Chunk 1
+            pre1 = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "search"},
+                "transcript_path": transcript_path,
+            }, guard=None, log_dir=self.test_dir)
+            self.assertTrue(pre1.get("continue"))
+
+            state_path = os.path.join(self.test_dir, f"_state_{session_id}.json")
+            with open(state_path, "r", encoding="utf-8") as f:
+                state1 = json.load(f)
+            offset1 = state1.get("transcript_offset", 0)
+            self.assertGreater(offset1, 0)
+            self.assertEqual(offset1, os.path.getsize(transcript_path))
+
+            # Append Chunk 2: Non-plan plain prose
+            with open(transcript_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Proceeding with next operational task."
+                        }
+                    ]
+                }) + "\n")
+
+            # Phase 2 trigger
+            handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "step2"},
+                "tool_response": "done",
+            }, guard=mock_guard, log_dir=self.test_dir)
+
+            # Phase 2 PreToolUse should only read Chunk 2, advance offset2, and not re-process Chunk 1
+            pre2 = handle_hook({
+                "session_id": session_id,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "step2_action"},
+                "transcript_path": transcript_path,
+            }, guard=None, log_dir=self.test_dir)
+            self.assertTrue(pre2.get("continue"))
+
+            with open(state_path, "r", encoding="utf-8") as f:
+                state2 = json.load(f)
+            offset2 = state2.get("transcript_offset", 0)
+            self.assertGreater(offset2, offset1)
+            self.assertEqual(offset2, os.path.getsize(transcript_path))
+        finally:
+            if old_val is not None:
+                os.environ["GUARD_BLOCK_ON_CRITICAL"] = old_val
+            else:
+                os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
+
 
 if __name__ == "__main__":
     unittest.main()

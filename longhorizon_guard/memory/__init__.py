@@ -21,6 +21,10 @@ from longhorizon_guard.memory.schema import (
     TriggersErrorEdge,
 )
 from longhorizon_guard.memory.associative_engine import AssociativeMemoryEngine
+from longhorizon_guard.memory.capability_classifier import (
+    classify_action_capability,
+    classify_subgoal_category,
+)
 from longhorizon_guard.memory.causal_graph import CausalErrorGraph
 from longhorizon_guard.memory.memory_guard import MemoryGuard
 from longhorizon_guard.memory.seed_loader import bootstrap_memory_graph
@@ -46,4 +50,6 @@ __all__ = [
     "LocalConceptIndex",
     "bootstrap_memory_graph",
     "MemoryGuard",
+    "classify_action_capability",
+    "classify_subgoal_category",
 ]

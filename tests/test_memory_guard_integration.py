@@ -268,3 +268,124 @@ class TestMemoryGuardIntegration:
         assert b_res["next_subgoal"] == "subgoal_002"
         assert "prerequisite_violation" not in b_res
         assert b_res.get("warning") is None
+
+    def test_action_capability_classifier_codex_shell_tool(self):
+        """Action capability classifier maps 'shell' to 'bash' anti-pattern node."""
+        cfg = GuardConfig(enable_memory=True, memory_storage_path=":memory:")
+        guard = GuardInterface(config=cfg)
+
+        # Step invokes Codex-style 'shell' tool with 'command' argument
+        step_rec = {
+            "step_index": 0,
+            "action_name": "shell",
+            "action_args": {"command": "rm -rf /"},
+            "tool_response": "Permission denied: rm: cannot remove '/'",
+        }
+        res = guard.on_step(step_rec, history=[])
+        assert res["flagged"] is True
+        assert any("safe trash" in s.lower() or "target" in s.lower() for s in res.get("suggestions", []))
+
+    def test_on_subgoal_boundary_prerequisite_violation_realistic_phrasing(self):
+        """Realistic phrasing: 'Deploy service to production' active before 'Run the test suite' completed triggers advisory."""
+        cfg = GuardConfig(enable_memory=True, memory_storage_path=":memory:")
+        guard = GuardInterface(config=cfg)
+
+        plan = "1. Build the service\n2. Run the test suite\n3. Deploy service to production"
+        guard.on_plan_proposed(
+            task_description="Build, test and deploy service",
+            proposed_plan=plan,
+            metadata={"run_id": "test_e2e_real_prereq_001"},
+        )
+
+        # Step 0: completes subgoal_001 ("Build the service")
+        step0 = {
+            "step_index": 0,
+            "reasoning": "Building the service",
+            "action_name": "build",
+            "action_args": {"target": "all"},
+            "tool_response": "Build completed successfully. task complete",
+        }
+        res0 = guard.on_step(step0, history=[], metadata={"run_id": "test_e2e_real_prereq_001"})
+        assert res0.get("subgoal_transition") is not None
+
+        b_res0 = guard.on_subgoal_boundary(
+            subgoal_id="subgoal_001",
+            subgoal_status="completed",
+            step_history=[step0],
+        )
+        assert b_res0["checkpoint_passed"] is True
+        assert b_res0["next_subgoal"] == "subgoal_002"
+        assert "prerequisite_violation" not in b_res0
+
+        # Step 1: fails on subgoal_002 ("Run the test suite")
+        step1 = {
+            "step_index": 1,
+            "reasoning": "Running test suite",
+            "action_name": "pytest",
+            "action_args": {"flags": "-v"},
+            "tool_response": "tests failed with exit code 1",
+        }
+        res1 = guard.on_step(step1, history=[step0], metadata={"run_id": "test_e2e_real_prereq_001"})
+        assert res1.get("subgoal_transition") is not None
+
+        # Boundary for subgoal_002 transitioning as failed -> next active is subgoal_003 ("Deploy service to production")
+        b_res1 = guard.on_subgoal_boundary(
+            subgoal_id="subgoal_002",
+            subgoal_status="failed",
+            step_history=[step0, step1],
+        )
+        assert b_res1["checkpoint_passed"] is False
+        assert b_res1["next_subgoal"] == "subgoal_003"
+        # Subgoal 3 active, but run_tests was NOT completed
+        assert "prerequisite_violation" in b_res1
+        assert b_res1["prerequisite_violation"]["active_subgoal"] == "subgoal_003"
+        missing = b_res1["prerequisite_violation"]["missing_prerequisites"]
+        assert any("test" in m.lower() or "run_tests" in m.lower() for m in missing)
+        assert "[memory:prerequisite_violation]" in b_res1.get("warning", "")
+        assert any("test" in s.lower() for s in b_res1.get("suggestions", []))
+
+    def test_on_subgoal_boundary_prerequisites_clean_path_realistic_phrasing(self):
+        """Clean path with realistic phrasing: all prerequisites completed before deploy service becomes active."""
+        cfg = GuardConfig(enable_memory=True, memory_storage_path=":memory:")
+        guard = GuardInterface(config=cfg)
+
+        plan = "1. Build the service\n2. Run the test suite\n3. Deploy service to production"
+        guard.on_plan_proposed(
+            task_description="Build, test and deploy service",
+            proposed_plan=plan,
+            metadata={"run_id": "test_e2e_real_clean_001"},
+        )
+
+        step0 = {
+            "step_index": 0,
+            "reasoning": "Building",
+            "action_name": "build",
+            "action_args": {},
+            "tool_response": "Build success task complete",
+        }
+        guard.on_step(step0, history=[])
+        b_res0 = guard.on_subgoal_boundary(
+            subgoal_id="subgoal_001",
+            subgoal_status="completed",
+            step_history=[step0],
+        )
+        assert "prerequisite_violation" not in b_res0
+
+        step1 = {
+            "step_index": 1,
+            "reasoning": "Testing",
+            "action_name": "test",
+            "action_args": {},
+            "tool_response": "Test success task complete",
+        }
+        guard.on_step(step1, history=[step0])
+        b_res1 = guard.on_subgoal_boundary(
+            subgoal_id="subgoal_002",
+            subgoal_status="completed",
+            step_history=[step0, step1],
+        )
+        assert b_res1["checkpoint_passed"] is True
+        assert b_res1["next_subgoal"] == "subgoal_003"
+        # Subgoal 3 active, and both build_project and run_tests are completed
+        assert "prerequisite_violation" not in b_res1
+        assert b_res1.get("warning") is None

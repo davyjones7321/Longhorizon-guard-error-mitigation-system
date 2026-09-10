@@ -9,6 +9,10 @@ import os
 from typing import Any, Dict, List, Optional
 
 from longhorizon_guard.memory.associative_engine import AssociativeMemoryEngine
+from longhorizon_guard.memory.capability_classifier import (
+    classify_action_capability,
+    classify_subgoal_category,
+)
 from longhorizon_guard.memory.causal_graph import CausalErrorGraph, _generate_id
 from longhorizon_guard.memory.schema import MemoryAdvisory
 from longhorizon_guard.memory.seed_loader import bootstrap_memory_graph
@@ -64,7 +68,8 @@ class MemoryGuard:
         for sg in subgoals:
             sg_id = str(sg.get("subgoal_id", "")).strip().lower()
             sg_desc = str(sg.get("description", "")).strip().lower()
-            target_query = f"{sg_id} {sg_desc}".strip()
+            sg_cat = classify_subgoal_category(sg_desc)
+            target_query = sg_cat if sg_cat else f"{sg_id} {sg_desc}".strip()
 
             # Check if this subgoal has unmet prerequisites in the causal graph
             is_valid, missing = self.causal_graph.check_subgoal_prerequisites(prior_subgoal_names, target_query)
@@ -85,6 +90,8 @@ class MemoryGuard:
                 self.working_memory.add_advisory(adv)
 
             prior_subgoal_names.append(sg_id)
+            if sg_cat:
+                prior_subgoal_names.append(sg_cat)
             if sg_desc:
                 prior_subgoal_names.append(sg_desc)
 
@@ -157,10 +164,17 @@ class MemoryGuard:
 
         from longhorizon_guard.memory.schema import NodeType
         tool_clean = tool_name.strip().lower()
+        tool_cap = classify_action_capability(tool_name)
         for nid, data in self.causal_graph.graph.nodes(data=True):
             if data.get("node_type") == NodeType.ACTION_PATTERN.value:
                 node_tool = str(data.get("tool_name", "")).strip().lower()
-                if node_tool == tool_clean:
+                node_cap = classify_action_capability(node_tool)
+                if tool_cap is not None and node_cap is not None:
+                    tool_matches = (tool_cap == node_cap)
+                else:
+                    tool_matches = (node_tool == tool_clean)
+
+                if tool_matches:
                     node_pat = str(data.get("argument_pattern", "")).strip().lower()
                     if node_pat:
                         if (

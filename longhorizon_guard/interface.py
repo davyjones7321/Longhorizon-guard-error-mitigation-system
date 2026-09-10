@@ -1340,17 +1340,27 @@ class GuardInterface:
             if self._memory_guard is not None and self._subgoal_tracker is not None:
                 new_active_subgoal = self._subgoal_tracker.active_subgoal
                 if new_active_subgoal is not None:
-                    real_completed = [
-                        s.description
-                        for s in self._subgoal_tracker.subgoals
-                        if s.status == SubgoalStatus.COMPLETED.value
-                    ]
-                    # Also include subgoal_ids to support matching against either description or ID
-                    for s in self._subgoal_tracker.subgoals:
-                        if s.status == SubgoalStatus.COMPLETED.value and s.subgoal_id not in real_completed:
-                            real_completed.append(s.subgoal_id)
+                    from longhorizon_guard.memory.capability_classifier import classify_subgoal_category
 
-                    query = f"{new_active_subgoal.subgoal_id} {new_active_subgoal.description}"
+                    real_completed = []
+                    for s in self._subgoal_tracker.subgoals:
+                        if s.status == SubgoalStatus.COMPLETED.value:
+                            canonical_id = classify_subgoal_category(s.description)
+                            completed_val = canonical_id if canonical_id else s.description
+                            if completed_val not in real_completed:
+                                real_completed.append(completed_val)
+                            # Also retain raw description and subgoal_id for graceful fallback and literal matches
+                            if s.description and s.description not in real_completed:
+                                real_completed.append(s.description)
+                            if s.subgoal_id and s.subgoal_id not in real_completed:
+                                real_completed.append(s.subgoal_id)
+
+                    active_canonical = classify_subgoal_category(new_active_subgoal.description)
+                    query = (
+                        active_canonical
+                        if active_canonical
+                        else f"{new_active_subgoal.subgoal_id} {new_active_subgoal.description}".strip()
+                    )
                     is_valid, missing = self._memory_guard.causal_graph.check_subgoal_prerequisites(
                         real_completed, query
                     )

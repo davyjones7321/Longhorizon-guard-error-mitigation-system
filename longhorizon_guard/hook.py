@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Ensure repository root is on sys.path regardless of execution directory
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -500,7 +500,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         # Check if guard halted execution on critical flag
         if step_res.get("continue_execution") is False:
             state["halt_next_tool"] = True
-            cat_str = cat or "critical"
+            cat_str = cat or "other"
             warn_str = step_res.get("warning") or "Critical guard intervention"
             state["halt_reason"] = f"Critical flag on step {step_idx} [{cat_str}]: {warn_str}"
 
@@ -509,7 +509,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         # If flagged, alert the user and inject steer guidance into LLM's context window!
         if step_res.get("flagged"):
             warning = step_res.get("warning", "Potential issue detected")
-            cat_display = cat or "drift"
+            cat_display = cat or "other"
             sugg_str = f" Suggestion: {suggestions[0]}" if suggestions else ""
 
             sys.stderr.write(

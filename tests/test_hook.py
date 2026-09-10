@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-from longhorizon_guard.hook import handle_hook
+from longhorizon_guard.hook import handle_hook, _extract_recent_plan_text
 
 
 class TestHookIntegration(unittest.TestCase):
@@ -708,6 +708,23 @@ class TestHookIntegration(unittest.TestCase):
                 os.environ["GUARD_BLOCK_ON_CRITICAL"] = old_val
             else:
                 os.environ.pop("GUARD_BLOCK_ON_CRITICAL", None)
+
+    def test_extract_recent_plan_text_with_realistic_assistant_chunk(self):
+        """Guard against NameError or silent failure in _extract_recent_plan_text."""
+        chunk = json.dumps({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "1. Run unit test suite to check baseline.\n2. Apply bugfixes to source modules.\n3. Verify test pass rate."
+                }
+            ]
+        }) + "\n"
+        extracted = _extract_recent_plan_text(chunk)
+        self.assertIsNotNone(extracted)
+        self.assertIn("Run unit test suite", extracted)
+        self.assertIn("Verify test pass rate", extracted)
 
 
 if __name__ == "__main__":

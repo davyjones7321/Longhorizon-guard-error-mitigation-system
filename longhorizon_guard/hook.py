@@ -1,4 +1,4 @@
-"""WorkBuddy and CodeBuddy Native Lifecycle Hook Integration for LongHorizon Guard.
+"""OpenAI Codex and Claude Code Native Lifecycle Hook Integration for LongHorizon Guard.
 
 Reads hook event payloads from stdin, tracks multi-step agent trajectories,
 flags drift/loops in real time, intercepts harmful actions (PreToolUse deny),
@@ -237,14 +237,29 @@ def _is_plan_shaped(text: str) -> bool:
         return False
 
 
+def _detect_agent_source(payload: Dict[str, Any]) -> str:
+    """Detect whether the invoking agent is Claude Code, Codex, or generic harness."""
+    transcript_path = str(payload.get("transcript_path") or "").lower()
+    if ".claude" in transcript_path or "CLAUDE_PROJECT_DIR" in os.environ:
+        return "claude_code_hook"
+    if ".codex" in transcript_path or any(k.startswith("CODEX_") for k in os.environ):
+        return "codex_hook"
+    return "codex_hook"
+
+
 def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None, log_dir: str = DEFAULT_HOOK_LOG_DIR) -> Dict[str, Any]:
     """Process a single lifecycle hook event payload."""
     event_name = payload.get("hook_event_name", "")
     session_id = str(payload.get("session_id") or "default")
+    agent_source = _detect_agent_source(payload)
     state = _load_session_state(session_id, log_dir)
 
     if guard is None:
-        guard = GuardInterface()
+        from longhorizon_guard.config import GuardConfig
+        cfg = GuardConfig.from_env()
+        if os.getenv("GUARD_ENABLE_MEMORY", "true").lower() in ("true", "1", "yes"):
+            cfg.enable_memory = True
+        guard = GuardInterface(config=cfg)
         # Restore session state if resuming an active session across process invocations
         task_desc = state.get("task_description", "")
         plan_desc = state.get("proposed_plan", "")
@@ -252,7 +267,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
             guard.on_plan_proposed(
                 task_description=task_desc,
                 proposed_plan=plan_desc,
-                metadata={"source": "workbuddy_hook", "session_id": session_id},
+                metadata={"source": agent_source, "session_id": session_id},
             )
             # Replay prior history steps to restore tracker, drift, and reflector state
             replay_hist = []
@@ -260,7 +275,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
                 guard.on_step(
                     step_record=past_step,
                     history=replay_hist,
-                    metadata={"source": "workbuddy_hook", "session_id": session_id, "in_replay": True},
+                    metadata={"source": agent_source, "session_id": session_id, "in_replay": True},
                 )
                 replay_hist.append(past_step)
 
@@ -277,7 +292,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         plan_res = guard.on_plan_proposed(
             task_description=prompt,
             proposed_plan=plan,
-            metadata={"source": "workbuddy_hook", "session_id": session_id},
+            metadata={"source": agent_source, "session_id": session_id},
         )
 
         # Check if guard rejected the plan
@@ -331,7 +346,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
                         plan_res = guard.on_plan_proposed(
                             task_description=state.get("task_description", ""),
                             proposed_plan=extracted_text,
-                            metadata={"source": "workbuddy_hook", "session_id": session_id, "phase": True},
+                            metadata={"source": agent_source, "session_id": session_id, "phase": True},
                         )
                         if plan_res.get("approved") is False:
                             _apply_plan_rejection(state, plan_res)
@@ -449,7 +464,7 @@ def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None,
         step_res = guard.on_step(
             step_record=step_record,
             history=prior_history,
-            metadata={"source": "workbuddy_hook", "session_id": session_id},
+            metadata={"source": agent_source, "session_id": session_id},
         )
 
         state["history"].append(step_record)

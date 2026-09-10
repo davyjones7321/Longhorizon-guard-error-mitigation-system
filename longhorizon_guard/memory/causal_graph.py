@@ -29,7 +29,7 @@ from longhorizon_guard.memory.schema import (
 logger = logging.getLogger("longhorizon_guard.memory.causal_graph")
 
 DEFAULT_MEMORY_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "findings",
     "memory",
 )

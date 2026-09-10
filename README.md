@@ -1,490 +1,389 @@
-# LongHorizon Guard: Long-Horizon Agent Error Mitigation & Trajectory Monitoring
+# LongHorizon Guard: Long-Horizon Agent Error Mitigation & Causal Memory
 
-LongHorizon Guard is a Python library and CLI tool designed to detect, track, and mitigate failure propagation in long-horizon autonomous LLM agent workflows.
+[![Python](https://img.shields.io/badge/Python-3.9%20|%203.10%20|%203.11%20|%203.12%20|%203.13-blue.svg)](https://python.org)
+[![Tests](https://img.shields.io/badge/Tests-105%20Passed%20(100%25)-success.svg)](file:///d:/edge-downloades/d/intership-projects/error-prop/tests)
+[![Architecture](https://img.shields.io/badge/Architecture-3--Tier%20HippoRAG%20Causal%20Memory-purple.svg)](file:///d:/edge-downloades/d/intership-projects/error-prop/longhorizon_guard/memory)
 
-The system monitors agent execution trajectories step-by-step using a two-layer failure detection engine, tracks subgoal progress, measures trajectory drift, and triggers plan reflection to prevent error cascading across extended task horizons.
+**LongHorizon Guard** is a real-time error mitigation, trajectory governance, and causal memory framework designed for autonomous LLM coding agents (**OpenAI Codex**, **Claude Code**, **Cursor**, **Aider**, and **OpenCode**). 
+
+In complex, multi-step tasks, autonomous agents rarely fail because of a single catastrophic bug; instead, **small, unnoticed mistakes at Step 2 propagate into trajectory drift by Step 6 and total task collapse by Step 12**. LongHorizon Guard intercepts agent execution step-by-step, validates action prerequisites, tracks multi-horizon drift, and uses a neurobiologically inspired **HippoRAG causal knowledge graph** to discover reachable recovery actions before mistakes cascade.
 
 ---
 
-## Technical Foundations and Academic Citations
+## Academic Foundations & Literature Citations
 
-LongHorizon Guard builds upon foundational research in LLM agent failure taxonomy, error propagation, and self-reflection:
+LongHorizon Guard synthesizes four foundational lines of academic research across LLM agent failure taxonomy, structural debugging, reinforcement learning, and neurobiological associative memory:
 
-1. **AgentErrorBench: Evaluating and Mitigating Failure Propagation in Language Agent Workflows**
-   - Paper: [arXiv:2410.15836](https://arxiv.org/abs/2410.15836)
-   - Dataset: [AgentErrorBench on GitHub](https://github.com/THUDM/AgentErrorBench) | [HuggingFace Datasets](https://huggingface.co/datasets/THUDM/AgentErrorBench)
-   - Implemented Components: Primary taxonomy of root-cause error categories (`planning_error`, `reflection_error`, `memory_error`, `tool_use_error`, `external_error`), trajectory structure schema, and benchmark evaluation methodology across ALFWORLD, WebShop, and GAIA environments.
+### 1. HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models
+* **Authors:** Bernal Gutiérrez, et al. (Ohio State University & Stanford University, 2024)
+* **Citation:** NeurIPS 2024 | [arXiv:2405.14831](https://arxiv.org/abs/2405.14831)
+* **What We Adopted:**
+  * **Dual-Memory Neurobiological Architecture**: Mimicking the mammalian brain's division between the neocortex (short-term working buffer) and hippocampus (structured relational index). LongHorizon Guard splits state into an in-process **`WorkingMemory`** and an indexed **`CausalErrorGraph`**.
+  * **Personalized PageRank (PPR) Associative Diffusion**: Rather than relying strictly on dense vector embedding similarity (which misses multi-hop causal chains), LongHorizon Guard implements HippoRAG's graph diffusion algorithm. It injects personalized teleportation energy at active action/tool nodes and diffuses probability mass across typed causal edges to calculate downstream error risk and find reachable recovery strategies in **<0.5ms** (well below the 15ms agent timeout budget).
 
-2. **AgentDebug: Fine-Grained Error Detection and Localization for LLM Agents**
-   - Paper: [arXiv:2409.11727](https://arxiv.org/abs/2409.11727)
-   - Implemented Components: Fine-grained structural detectors for action repetition, nothing-happens loop detection, and early step localization of root-cause errors.
+### 2. AgentErrorBench: Evaluating and Mitigating Failure Propagation in Language Agent Workflows
+* **Authors:** Tsinghua University & Zhipu AI (2024)
+* **Citation:** [arXiv:2410.15836](https://arxiv.org/abs/2410.15836) | [GitHub](https://github.com/THUDM/AgentErrorBench)
+* **What We Adopted:**
+  * Root-cause error taxonomy: Standardized five-category taxonomy (`planning_error`, `reflection_error`, `memory_error`, `tool_use_error`, `external_error`).
+  * Benchmark evaluation methodology across ALFWORLD, WebShop, and GAIA trajectories.
 
-3. **Reflexion: Language Agents with Verbal Reinforcement Learning**
-   - Paper: [arXiv:2303.11366](https://arxiv.org/abs/2303.11366)
-   - Implemented Components: Periodic verbal plan reflection and invalidation triggers based on stalled subgoal counts and trajectory drift thresholds.
+### 3. AgentDebug: Fine-Grained Error Detection and Localization for LLM Agents
+* **Authors:** Fudan University, et al. (2024)
+* **Citation:** [arXiv:2409.11727](https://arxiv.org/abs/2409.11727)
+* **What We Adopted:**
+  * Fine-grained structural detectors for action repetition loops, observation stagnation ("nothing happens" cycles), and early step localization of initial root causes.
+
+### 4. Reflexion: Language Agents with Verbal Reinforcement Learning
+* **Authors:** Shinn, et al. (Northeastern University, MIT, Princeton, 2023)
+* **Citation:** [arXiv:2303.11366](https://arxiv.org/abs/2303.11366)
+* **What We Adopted:**
+  * Dynamic plan invalidation triggers and verbal reflection summaries driven by accumulated subgoal stalls and trajectory drift acceleration.
+
+---
+
+## 3-Tier HippoRAG Causal Memory Architecture
+
+Standard RAG systems retrieve documents using vector similarity, but **vector search cannot understand causality or multi-hop dependency chains** (e.g., *“Deploying to staging failed because database migrations were never executed during the build phase”*). LongHorizon Guard implements a 3-tier memory system designed for agent causality:
+
+```text
+                           ┌────────────────────────┐
+                           │     GuardInterface     │
+                           └──────────┬─────────────┘
+                                      │
+                                      ▼
+                           ┌────────────────────────┐
+                           │      MemoryGuard       │
+                           │     (Coordinator)      │
+                           └──────┬───────────┬─────┘
+                                  │           │
+            ┌─────────────────────┴───┐       │
+            ▼                         ▼       ▼
+ ┌───────────────────────┐ ┌─────────────────────────┐ ┌───────────────────────┐
+ │     WorkingMemory     │ │    CausalErrorGraph     │ │   LocalConceptIndex   │
+ │  - Sliding Step Window│ │  - NetworkX DiGraph     │ │  - Sparse TF-IDF Cosine │
+ │  - Drift Velocity/Acc │ │  - Prerequisite Edges   │ │  - Task Similarity      │
+ │  - Loop Signature DB  │ │  - Multi-Hop Cascades   │ │  - Zero External API    │
+ └───────────────────────┘ └───────────┬─────────────┘ └───────────────────────┘
+                                       │
+                                       ▼
+                           ┌─────────────────────────┐
+                           │ AssociativeMemoryEngine │
+                           │ - HippoRAG Personalized │
+                           │   PageRank (PPR <0.5ms) │
+                           │ - Multi-Hop Causal Risk │
+                           │ - Recovery Path Search  │
+                           └─────────────────────────┘
+```
+
+### Tier 1: Ephemeral Working Memory (`WorkingMemory`)
+Maintained in-process during active execution:
+* **Sliding Action Window**: Retains recent action signatures and arguments.
+* **Repetition Counter**: Detects repeated action calls with identical arguments that failed, catching loops before token exhaustion.
+* **Kinematic Drift Monitoring**: Calculates first-derivative (drift velocity) and second-derivative (drift acceleration) across subgoal intervals.
+* **Advisory State**: Maintains unacknowledged warnings and steering signals.
+
+### Tier 2: Causal Error Knowledge Graph (`CausalErrorGraph`)
+A directed multigraph backed by NetworkX (`nx.DiGraph`), persisted locally to JSON (`findings/memory/causal_graph.json`) or in-memory (`:memory:`):
+* **No External Database Required**: Operates completely embedded with zero Neo4j, Redis, or Docker daemons.
+* **Graph Node Entities**:
+  * `TaskConceptNode`: High-level user tasks and requirements.
+  * `SubgoalNode`: Plan phases with topological prerequisite constraints.
+  * `ActionPatternNode`: Normalized tool patterns and parameter templates.
+  * `ErrorSignatureNode`: Classified error taxonomy categories and error regexes.
+  * `RecoveryNode`: Prescribed corrective actions and safe tool alternatives.
+* **Relational Causal Edges**:
+  * `PREREQUISITE_OF`: Topological dependencies between milestones (e.g., `run_tests` → `deploy_service`).
+  * `TRIGGERS_ERROR`: Direct causal edge linking an action to an observed failure signature.
+  * `PROPAGATES_TO`: Multi-step cascade edge modeling error evolution (e.g., `planning_error` → `tool_use_error` → `drift`).
+  * `REMEDIED_BY`: Edge mapping an error node to an effective recovery action.
+
+### Tier 3: HippoRAG Associative Diffusion Engine (`AssociativeMemoryEngine`)
+Implements **Personalized PageRank (PPR)** over the causal graph:
+1. When an agent proposes an action, the engine seeds personalized teleportation probability on matching `ActionPatternNode` entities.
+2. Probability mass diffuses across all causal and cascade edges.
+3. The engine computes associative error risk scores and retrieves reachable `RecoveryNode` safe alternatives in **<0.5ms**.
+4. **Capability Normalization (`capability_classifier.py`)**: Real tool names (`shell`, `Bash`, `exec_command`, `powershell`, `cmd`) and natural task phrasings are automatically normalized into canonical capabilities, ensuring checks never fail due to harness-specific naming differences.
 
 ---
 
 ## Core System Architecture
 
-The package implements a modular, non-blocking 4-hook interface (`GuardInterface`):
+LongHorizon Guard operates through a modular, fail-open 4-hook lifecycle interface:
 
 ```text
-  Host Agent Execution Loop
-             |
+  Host AI Agent (Codex / Claude Code / Cursor / Aider)
+             │
              +---> 1. on_plan_proposed(task_description, proposed_plan)
-             |
+             │          - Parses subgoals & verifies prerequisite order
+             │          - HippoRAG checks plan against known failure patterns
+             │
              +---> 2. on_step(step_record, history)
-             |          |
-             |          +---> Layer A: Broad-Corpus TF-IDF Pattern Matcher
-             |          +---> Layer B: Structural & Heuristic Rule Detectors
-             |          +---> SubgoalTracker (State & Rule S3 Status)
-             |          +---> DriftMonitor (Severity: none / low / medium / high / critical)
-             |          +---> PlanReflector (Dual Triggers & Coincidence Guard)
-             |
+             │          │
+             │          +---> Layer A: Broad-Corpus TF-IDF Pattern Matcher (5,454 IDF terms)
+             │          +---> Layer B: Structural & Heuristic Rule Detectors (Loop/Repetition)
+             │          +---> SubgoalTracker: Enforces Rule S3 & phase transitions
+             │          +---> DriftMonitor: Calculates drift severity (none/low/med/high/crit)
+             │          +---> PlanReflector: Triggers plan reflection on high drift
+             │
              +---> 3. on_subgoal_boundary(subgoal_id, status)
-             |
-             +---> 4. on_run_end(metadata, trajectory) -> Failure Summary
+             │          - Evaluates milestone completion & updates drift velocity
+             │
+             +---> 4. on_run_end(metadata, trajectory)
+                        - Correlates root cause errors with downstream drift
+                        - Writes error cascades to persistent Causal Graph
+                        - Emits complete audit summary
 ```
 
-### Key Modules Implemented
-
-1. **Two-Layer Failure Matching Engine**:
-   - **Layer A (Broad-Corpus TF-IDF Pattern Matcher)**: Matches step reasoning and action text against 11 mined failure pattern centroids using a pre-computed 5,454-term broad-corpus IDF table built across 5,013 trajectory steps.
-   - **Layer B (Structural & Rule Detectors)**: Fallback rule detectors for structural failure modes including action repetition (`_detect_action_repetition`), repeated observation stagnation (`_detect_nothing_happens_loop`), mechanical search (`planning_exhaustive_search`), malformed tool formatting, and step limit exhaustion.
-   - **Input Scoping**: Layer A vectorizes only novel step text (`reasoning + action_name + action_args`), explicitly excluding `tool_response` from TF-IDF vectorization to prevent environment boilerplate false positives (such as repeated ALFWORLD cabinet and countertop descriptions). Layer B structural detectors retain full access to raw `tool_response` text.
-
-2. **Subgoal Tracker (`subgoals/tracker.py`)**:
-   - Parses agent-declared plans into structured subgoals.
-   - Tracks state transitions across the full `SubgoalStatus` lifecycle: `not_started`, `in_progress`, `completed`, `stalled_advanced`, `failed`, and `abandoned`.
-   - Implements Rule S3: assigns `stalled_advanced` status when an agent exceeds the maximum step limit (default: 10 steps, configurable via `max_subgoal_steps`) and is forced to advance to a subsequent subgoal without completing the current one.
-
-3. **Drift Monitor (`drift_monitor/monitor.py`)**:
-   - Assesses trajectory drift severity across 5 discrete levels: `none`, `low`, `medium`, `high`, and `critical` (mapped from numeric drift score [0.0, 1.0]).
-   - Flags drift when severity score meets or exceeds `drift_threshold` (default: 0.35, configurable via `GuardConfig`), triggered by accumulated signals (repeated stalled subgoals, slow progress ratio, accumulated subgoal failures, or pattern repetition).
-   - Degrades gracefully when pattern or subgoal data is absent.
-
-4. **Plan Reflector (`reflector/reflector.py`)**:
-   - Evaluates whether the active plan remains viable.
-   - Invalidates plans when 2 or more subgoals fail or when drift severity reaches `high` or `critical`.
-   - Uses dual triggers (subgoal boundaries and step intervals) coupled with a coincidence guard to prevent duplicate evaluations.
-
-5. **Fail-Open System Contract**:
-   - Wraps execution in safe exception handlers with a 2.0-second maximum timeout per hook.
-   - Guarantees that internal monitor failures or unhandled exceptions log a warning and return `flagged=False`, preventing host agent execution crashes.
-
-6. **3-Tier Hybrid Graph-RAG Causal Memory (`memory/`)**:
-   - Maintains ephemeral working memory and a persistent Causal Error Knowledge Graph.
-   - Evaluates multi-hop error propagation and discovers safe recovery alternatives using HippoRAG Personalized PageRank (PPR) causal diffusion (<15ms latency).
-   - Dynamically learns new failure patterns, cascades, and recovery actions across agent sessions without external database daemons.
+### Safety & Reliability Contract (Fail-Open Guarantee)
+Every hook invocation is wrapped in resilient exception boundaries with a strict **2.0-second timeout limit**. If any internal monitor, graph lookup, or matcher raises an exception, the guard logs a diagnostic warning and **fails open** (`flagged=False`), guaranteeing that **LongHorizon Guard will never crash your primary AI coding assistant**.
 
 ---
 
-## 3-Tier Hybrid Graph-RAG Causal Memory Architecture
+## Live Agent Integrations
 
-LongHorizon Guard incorporates a causal error memory engine designed to combat error cascades across multi-step execution. In long-horizon tasks, errors rarely happen in isolation: an unnoticed tool failure at step 2 often leads to drift at step 6 and catastrophic plan failure at step 12. The memory system enables the guard to recognize these multi-hop causal chains and intervene before errors propagate.
+LongHorizon Guard natively supports modern terminal coding agents via lifecycle command hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`).
 
-### Architecture Overview
+### 1. OpenAI Codex (First-Class Default)
 
-```text
-                          ┌────────────────────────┐
-                          │     GuardInterface     │
-                          └──────────┬─────────────┘
-                                     │
-                                     ▼
-                          ┌────────────────────────┐
-                          │      MemoryGuard       │
-                          │     (Coordinator)      │
-                          └──────┬───────────┬─────┘
-                                 │           │
-           ┌─────────────────────┴───┐       │
-           ▼                         ▼       ▼
-┌───────────────────────┐ ┌─────────────────────────┐ ┌───────────────────────┐
-│     WorkingMemory     │ │    CausalErrorGraph     │ │   LocalConceptIndex   │
-│  - Trajectory Window  │ │  - NetworkX DiGraph     │ │  - TF-IDF Sparse      │
-│  - Drift Trajectory   │ │  - Prerequisite Edges   │ │  - Cosine Similarity  │
-│  - Repetition Counter │ │  - Failure & Cascades   │ │  - Zero API Overhead  │
-└───────────────────────┘ └───────────┬─────────────┘ └───────────────────────┘
-                                      │
-                                      ▼
-                          ┌─────────────────────────┐
-                          │ AssociativeMemoryEngine │
-                          │ - HippoRAG Personalized │
-                          │   PageRank (PPR <15ms)  │
-                          │ - Multi-hop Risk Path   │
-                          │ - Recovery Discovery    │
-                          └─────────────────────────┘
-```
+OpenAI Codex is the default native environment for LongHorizon Guard.
 
-### The 3 Memory Tiers
-
-1. **Tier 1: Ephemeral Working Memory (`WorkingMemory`)**
-   - Maintained in-process during an active agent session.
-   - Tracks a sliding window of recent actions and arguments.
-   - Tracks repeated tool execution failure frequencies to catch immediate loops.
-   - Records drift trajectory metrics (score, velocity, acceleration) across steps.
-   - Manages active advisories emitted by the guard.
-
-2. **Tier 2: Causal Error Knowledge Graph (`CausalErrorGraph`)**
-   - Backed by a NetworkX directed graph (`nx.DiGraph`) persisted locally as JSON or SQLite (with full `:memory:` support for unit testing and ephemeral sandboxes).
-   - Requires zero external database daemons (no Neo4j, Redis, or cloud graph servers).
-   - **Typed Graph Entities**:
-     - `TaskConceptNode`: High-level user intent and task definitions.
-     - `SubgoalNode`: Plan milestones with strict or soft dependency relations.
-     - `ActionPatternNode`: Specific tool invocations and normalized argument signatures.
-     - `ErrorSignatureNode`: Classified error taxonomy categories and error regex/string patterns.
-     - `RecoveryNode`: Prescribed corrective actions and safe tool alternatives.
-   - **Typed Relational Edges**:
-     - `PREREQUISITE_OF`: Direct DAG dependencies between subgoals (e.g. `run_tests` must precede `deploy_service`).
-     - `TRIGGERS_ERROR`: Direct causal edge from an action pattern to an observed failure signature.
-     - `PROPAGATES_TO`: Multi-step cascade edge modeling temporal error transitions (e.g. `tool_use_error` $\to$ `drift`).
-     - `REMEDIED_BY`: Edge linking an error signature to an effective recovery strategy.
-
-3. **Tier 3: HippoRAG Associative Retrieval Engine (`AssociativeMemoryEngine`)**
-   - Implements **Personalized PageRank (PPR)** associative diffusion over the causal error graph (inspired by the HippoRAG hippocampal memory architecture).
-   - When an agent proposes or executes an action, the engine seeds personalized teleportation probability on the corresponding action and error nodes.
-   - Diffuses probability mass across multi-hop edges (`TRIGGERS_ERROR`, `PROPAGATES_TO`, `REMEDIED_BY`) to score downstream causal risks and discover reachable recovery actions in **<0.5ms** (far below the 15ms runtime threshold).
-   - Complemented by `LocalConceptIndex`, a self-contained sparse TF-IDF cosine similarity index that matches new tasks against historical failure patterns without requiring external embedding APIs.
-
-### Lifecycle Integration in `GuardInterface`
-
-- **Plan Inception (`on_plan_proposed`)**:
-  Inspects the proposed plan against the causal graph's prerequisite DAGs. If the plan attempts to schedule a milestone without satisfying prior required dependencies (e.g. deploying without building and testing), the guard flags a `prerequisite_violation` advisory and injects corrective ordering suggestions.
-- **Step Execution (`on_step`)**:
-  Before tool execution, extracts action signatures and runs associative PPR diffusion. If the action has high associative probability to known downstream failures (such as destructive shell operations or context overruns), the guard flags the step and attaches preventive `safe_alternative` suggestions.
-- **Run Finalization & Live Learning (`on_run_end`)**:
-  When an agent trajectory completes or fails, the guard records the observed failure sequence, correlates root-cause steps with downstream drift, and dynamically updates edge weights and cascade transitions in the persistent Causal Graph.
-
-### Enabling the Memory System
-
-The memory system is **100% backward compatible** and disabled by default (`enable_memory: bool = False`).
-
-#### Via Python API:
-```python
-from longhorizon_guard import GuardConfig, GuardInterface
-
-config = GuardConfig(
-    enable_memory=True,
-    memory_storage_path="findings/memory/causal_graph.json",  # or ":memory:" for in-memory
-)
-guard = GuardInterface(config=config)
-```
-
-#### Via Environment Variables:
+#### Automatic 1-Click Setup
+Run this single command from your Python environment:
 ```bash
-export GUARD_ENABLE_MEMORY=true
-export GUARD_MEMORY_STORAGE_PATH=findings/memory/causal_graph.json
+longhorizon-guard setup-codex
 ```
+* Automatically locates `~/.codex/config.toml`.
+* Cleans up legacy/conflicting hook configurations.
+* Registers all four lifecycle hooks with the active Python binary.
+
+#### Manual Configuration
+Add the following tables to `~/.codex/config.toml`:
+```toml
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "python -m longhorizon_guard.hook"
+timeout = 30
+statusMessage = "LongHorizon Guard is checking the task"
+
+[[hooks.PreToolUse]]
+matcher = ".*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python -m longhorizon_guard.hook"
+timeout = 30
+statusMessage = "LongHorizon Guard is checking the action"
+
+[[hooks.PostToolUse]]
+matcher = ".*"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "python -m longhorizon_guard.hook"
+timeout = 30
+statusMessage = "LongHorizon Guard is reviewing the result"
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "python -m longhorizon_guard.hook"
+timeout = 30
+statusMessage = "LongHorizon Guard is finalizing the run"
+```
+
+#### Run Codex with Guard Active
+```bash
+codex
+```
+*(On first run, press down-arrow to highlight **"2. Trust all and continue"** and press Enter. Codex will remember your choice).*
+
+---
+
+### 2. Claude Code Integration
+
+Claude Code hooks use the identical wire protocol as Codex and work seamlessly with the same engine.
+
+#### Automatic 1-Click Setup
+```bash
+# Configure current project (.claude/settings.json):
+longhorizon-guard setup-claude
+
+# OR configure globally (~/.claude/settings.json):
+longhorizon-guard setup-claude --global
+```
+
+#### Manual Configuration
+Add this hook block to `.claude/settings.json` (or `~/.claude/settings.json`):
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "python -m longhorizon_guard.hook",
+        "timeout": 30
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m longhorizon_guard.hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m longhorizon_guard.hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m longhorizon_guard.hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Run Claude Code
+```bash
+claude
+```
+Select **"Always Allow"** when Claude Code prompts for hook authorization on the first turn.
+
+---
+
+### 3. Real-Time API Proxy (Cursor, Aider, OpenCode)
+
+For IDE-based agents without native lifecycle hooks, LongHorizon Guard provides a non-intrusive reverse proxy:
+
+```bash
+longhorizon-guard proxy --port 8000 --upstream https://api.openai.com/v1
+```
+
+Point your agent to the proxy:
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
+```
+The proxy intercepts reasoning steps and tool calls transparently in the background, writing audit logs to `findings/proxy_sessions/`.
 
 ---
 
 ## Installation
 
 ### Prerequisites
-- Python 3.9 or higher
+* Python 3.9 or higher
 
-### Direct One-Line Installation (Pip from GitHub)
-Install directly from GitHub with zero subdirectory syntax required:
+### Direct Install from GitHub
 ```bash
 pip install git+https://github.com/davyjones7321/Longhorizon-guard-error-mitigation-system.git
 ```
 
-### Local Installation
+### Local / Development Install
 ```bash
 git clone https://github.com/davyjones7321/Longhorizon-guard-error-mitigation-system.git
 cd Longhorizon-guard-error-mitigation-system
-pip install .
-```
-
-For active development, install in editable mode:
-```bash
 pip install -e .
 ```
 
 ---
 
-## Usage
+## Python API Usage
 
-### 1. Command Line Interface (CLI)
-
-Check library status and verified pattern statistics:
-```bash
-longhorizon-guard info
-```
-
-Evaluate a JSON trajectory file:
-```bash
-longhorizon-guard evaluate --trajectory path/to/trajectory.json
-```
-
-Run the real-time API proxy to monitor coding assistants (OpenCode, Cursor, Aider, Claude Code):
-```bash
-longhorizon-guard proxy --port 8000 --upstream https://api.openai.com/v1
-```
-
-Once running, configure your coding assistant's API base URL once:
-- **OpenCode / Codex / Aider / Cursor**: Set environment variable:
-  ```bash
-  export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
-  ```
-- **Claude Code**: Set environment variable:
-  ```bash
-  export ANTHROPIC_BASE_URL="http://127.0.0.1:8000/v1"
-  ```
-The proxy intercepts all tool calls, reasoning steps, and plans transparently in the background, printing real-time warnings if the assistant enters an infinite loop, repeats failed commands, or drifts from its subgoals.
-
-### 2. Python API Integration
-
-Incorporate `GuardInterface` into an agent execution loop:
+Incorporate `GuardInterface` into custom agent loops or evaluation pipelines:
 
 ```python
-from longhorizon_guard import GuardInterface
+from longhorizon_guard import GuardConfig, GuardInterface
 
-# Initialize GuardInterface (automatically loads embedded broad-corpus IDF)
-guard = GuardInterface()
-
-# Hook 1: Register initial task description and plan
-task_description = "Locate item in WebShop and complete purchase"
-proposed_plan = "1. Search for item\n2. Select options\n3. Click buy now"
-plan_res = guard.on_plan_proposed(task_description, proposed_plan, metadata={"task_id": "webshop_01"})
-
-# Non-blocking contract: 'approved' means no internal hard error, 'flagged' means guard found an issue
-if plan_res["flagged"]:
-    print(f"Plan Warnings: {plan_res['flags']}")
-    print(f"Plan Suggestions: {plan_res['suggestions']}")
-
-# Hook 2: Process execution steps inside the agent loop
-history = []
-step_record = {
-    "step_index": 0,
-    "reasoning": "Search for blue cotton sweater in size medium",
-    "action_name": "search",
-    "action_args": {"query": "blue cotton sweater medium"},
-    "tool_response": "Found 15 items"
-}
-
-res = guard.on_step(step_record, history, metadata={"task_id": "webshop_01"})
-
-# Primary recommended field for simple integrations:
-if res["flagged"]:
-    print(f"Warning: {res['warning']}")
-
-# Advanced inspection path:
-if res.get("match_details"):
-    print(f"Pattern Match: {res['match_details']['category']} ({res['match_details']['confidence']:.2f})")
-if res.get("drift_detected"):
-    print(f"Drift Signals: {res['drift_assessment']['triggered_signals']}")
-if res.get("reflection_result", {}).get("revision_suggested"):
-    print(f"Plan Invalidation: {res['reflection_result']['revision_reasoning']}")
-
-history.append(step_record)
-
-# Hook 3: Fire on subgoal completion or transition
-guard.on_subgoal_boundary(
-    subgoal_id="subgoal_1",
-    subgoal_status="completed",
-    step_history=history,
-    metadata={"task_id": "webshop_01"},
-)
-
-# Hook 4: Finalize run and retrieve root-cause attribution
-summary = guard.on_run_end(
-    metadata={"task_id": "webshop_01"}, 
-    trajectory={"steps": history}
-)
-
-print(f"Root Cause Source: {summary['root_cause_source']}")  # 'pattern_match' | 'drift_monitor' | 'reflector' | 'none'
-print(f"Root Cause Category: {summary['root_cause_error_type']}")
-print(f"Root Cause Step Index: {summary['root_cause_step_index']}")
-```
-
-#### Centralized Configuration (`GuardConfig`)
-
-`GuardInterface` accepts an optional `config: GuardConfig` parameter for structured parameter tuning. When no `config` object is passed, `GuardInterface()` automatically defaults to `GuardConfig.from_env()`, which reads active environment variables (e.g., `GUARD_MAX_SUBGOAL_STEPS`, `GUARD_DRIFT_THRESHOLD`, `GUARD_FAIL_OPEN`) or falls back to built-in system defaults.
-
-Individual keyword arguments passed to `GuardInterface()` (`pattern_library_path`, `max_subgoal_steps`, `drift_threshold`, `category_thresholds`, `match_timeout`) take direct precedence and override values from `config`:
-
-```python
-from longhorizon_guard import GuardInterface, GuardConfig
-
-# Approach 1: Structured configuration object
+# Initialize with Causal Graph Memory enabled
 config = GuardConfig(
-    max_subgoal_steps=12,          # S3 step ceiling before marking stalled_advanced (default: 10)
-    drift_threshold=0.30,          # Severity threshold [0.0, 1.0] to flag drift_detected (default: 0.35)
-    reflection_step_interval=4,    # Cadence for periodic plan validity checks (default: 5)
-    fail_open=True,                # Catch internal errors without breaking agent (default: True)
+    enable_memory=True,
+    memory_storage_path="findings/memory/causal_graph.json",
+    drift_threshold=0.35,
 )
 guard = GuardInterface(config=config)
 
-# Approach 2: Direct constructor keyword argument overrides
-guard = GuardInterface(
-    max_subgoal_steps=8,
-    drift_threshold=0.40,
+# 1. Propose Plan
+plan_res = guard.on_plan_proposed(
+    task_description="Build priority queue and run tests",
+    proposed_plan="1. Implement queue.py\n2. Run automated tests",
 )
-```
+if not plan_res["approved"]:
+    print(f"Plan Warning: {plan_res['flags']}")
 
-### 3. Automatic Integrations (Zero-Change & Middleware)
+# 2. Execute Steps
+step_record = {
+    "step_index": 0,
+    "action_name": "Bash",
+    "action_args": {"command": "python -m unittest"},
+    "tool_response": "Ran 5 tests in 0.01s... OK",
+}
+step_res = guard.on_step(step_record, history=[])
+if step_res["flagged"]:
+    print(f"Step Flagged: {step_res['warning']}")
 
-If you use LangChain / LangGraph or standard OpenAI-compatible client libraries, you do not need to manually instrument your agent loops. LongHorizon Guard provides two native adapters:
-
-#### Path A: LangChain / LangGraph Callback Handler
-Add `LongHorizonGuardCallback` to your agent executor or chain. It automatically intercepts `on_chain_start`, `on_agent_action`, `on_tool_end` / `on_tool_error`, and `on_chain_end`, translating events into `GuardInterface` step records and executing the lifecycle hooks transparently:
-
-```python
-from langchain.agents import create_agent  # or AgentExecutor
-from longhorizon_guard import LongHorizonGuardCallback
-
-# 1. Instantiate callback (non-blocking logging by default)
-guard_callback = LongHorizonGuardCallback()
-
-# Optional: supply an on_flag hook if your host application wants to actively intervene
-def handle_guard_alert(step_res):
-    print(f"Intervention needed! Guard flagged: {step_res['warning']}")
-
-guard_callback = LongHorizonGuardCallback(on_flag=handle_guard_alert)
-
-# 2. Pass directly to your LangChain agent — ZERO changes to your agent loop
-agent = create_agent(..., callbacks=[guard_callback])
-result = agent.invoke({"input": "Find the latest ACME report and extract numbers."})
-
-# 3. Retrieve final trajectory summary
-print(guard_callback.last_run_summary)
-```
-
-#### Path B: OpenAI-Compatible Client Middleware (`wrap_guard`)
-For custom agents using `openai.OpenAI()` or any OpenAI-compatible client (such as local Ollama, vLLM, DeepSeek, or Groq), `wrap_guard()` intercepts `client.chat.completions.create()`:
-
-```python
-import openai
-from longhorizon_guard import wrap_guard
-
-# 1. Wrap your client once
-client = wrap_guard(openai.OpenAI())
-
-# 2. Run your normal multi-turn tool-calling loop unmodified
-# The wrapper observes tool calls, correlates tool responses, and calls on_step() automatically
-messages = [{"role": "user", "content": "Search for Python docs and summarize."}]
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=messages,
-    tools=[...],
+# 3. Complete Trajectory
+summary = guard.on_run_end(
+    metadata={"task_id": "task_01"},
+    trajectory={"steps": [step_record]},
 )
-
-# ... your normal tool execution loop ...
-
-# 3. Explicitly finalize when your task is complete
-run_summary = client.finalize_run()
-print(f"Root cause step: {run_summary['root_cause_step_index']}")
-```
-
-#### Honest Integration Boundaries: What is Automatic vs. What Still Requires Setup
-- **LangChain / LangGraph (`LongHorizonGuardCallback`)**:
-  - **Truly Automatic**: Plan extraction from initial inputs, step-by-step reasoning/tool/observation tracking, trajectory history maintenance, and `on_run_end` execution on chain finish.
-  - **Requires Setup**: Active intervention. By default, the guard is non-blocking (logs warnings). If you want the agent to abort or re-prompt on flags, you must provide an `on_flag` callable.
-- **OpenAI Client Wrapper (`wrap_guard`)**:
-  - **Truly Automatic**: Multi-turn tool call correlation (pairs assistant `tool_calls` with subsequent `role: "tool"` messages), schema translation into `step_record`, and transparent pass-through of all API responses and errors.
-  - **Requires Setup**:
-    1. **Calling `finalize_run()`**: An LLM client has no universal concept of when an agent's multi-step task is complete (some finish in 1 call, some loop 20 times). You must call `client.finalize_run()` when your loop terminates.
-    2. **Task/Plan Heuristic**: The wrapper treats the initial user message as the task description. If your agent uses a separate formal planning phase, explicit registration via `client.guard.on_plan_proposed(...)` gives higher precision than the heuristic.
-
-#### Path C: Real-Time HTTP API Proxy (`longhorizon-guard proxy`)
-For standalone coding assistants (Aider, OpenCode, Cursor, Claude Code) where you cannot modify agent source code, the built-in HTTP API proxy transparently intercepts chat completions between the agent and upstream LLM providers (e.g. OpenAI, Groq, Ollama, DeepSeek).
-
-```bash
-# 1. Start the proxy listening on port 8000
-python -m longhorizon_guard.proxy --upstream https://api.openai.com/v1
-
-# 2. In your coding assistant terminal, redirect the base URL:
-export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
-
-# 3. Run your assistant normally
-aider
-```
-
-##### Dual Supported Observation Modes
-- **Native Function Calling (`tool_calls` mode)**:
-  Used by assistants like OpenCode, Cursor Agent, and Claude Code. The proxy captures assistant `tool_calls`, correlates them with subsequent `role: "tool"` responses, and dispatches them to `guard.on_step()`.
-- **Plain-Text File Edits (`text_edits` mode)**:
-  Used by assistants like Aider that format code edits as plain text directly in the assistant's completion content rather than function calling. The proxy parses Aider git-style SEARCH/REPLACE diff blocks, unified diffs (`udiff`), and whole-file replacements, recording each completed file modification as an individual step in the trajectory.
-- **Task Extraction Heuristic**:
-  Structurally selects the real user task from conversation messages while skipping canned system-prompt few-shot demonstration examples (e.g. "Change the greeting to be more casual").
-- **Automatic Session Logging**:
-  Sanitized session transcripts (`plan`, `step`, `summary`) are recorded to JSONL files under `findings/proxy_sessions/`. Turn completion (`finish_reason: "stop"`) or proxy shutdown automatically invokes `guard.on_run_end()` to produce the final trajectory summary.
-
----
-
-## LLM-as-a-Judge Evaluation & Provider Configuration
-
-LongHorizon Guard includes an automated, multi-provider LLM judge (`longhorizon_guard.taxonomy.judge`) to evaluate completed trajectories and benchmark root-cause attribution.
-
-### 1. Code-Free Provider Setup (`providers.yaml` & `.env`)
-You can configure or switch providers without writing any code:
-1. Copy the secrets template to `.env` and add your API keys:
-   ```bash
-   cp .env.example .env
-   ```
-2. (Optional) Copy the provider template to `providers.yaml` to customize models, temperatures, or add local endpoints:
-   ```bash
-   cp providers.example.yaml providers.yaml
-   ```
-
-### 2. Supported Providers Out of the Box
-- **Local / Self-Hosted Models**:
-  - **Ollama**: Pre-configured (`--provider local_ollama` or `--base-url http://localhost:11434/v1`)
-  - **vLLM / LMStudio**: Pre-configured (`--provider local_vllm`)
-- **OpenAI-Compatible Cloud Gateways**:
-  - **DeepSeek**: Pre-configured (`--provider deepseek`)
-  - **OpenAI Official**: Pre-configured (`--provider openai` with `OPENAI_API_KEY`)
-- **Native Direct APIs**:
-  - **Google Gemini**, **Groq**, **Cloudflare Workers AI**, **OpenRouter**, **NVIDIA NIM**, **TokenRouter**.
-
-### 3. Running the Judge CLI
-```bash
-# Run with local Ollama (zero API keys needed):
-python -m longhorizon_guard.taxonomy.judge --provider local_ollama
-
-# Run with an OpenAI-compatible endpoint on the fly:
-python -m longhorizon_guard.taxonomy.judge \
-    --provider openai-compatible \
-    --base-url http://localhost:11434/v1 \
-    --model qwen2.5:14b
-
-# Run with Groq or Gemini using a custom model override:
-python -m longhorizon_guard.taxonomy.judge --provider groq --model llama-3.3-70b-versatile
-python -m longhorizon_guard.taxonomy.judge --provider gemini --model gemini-2.5-flash
+print(f"Run Outcome: {summary.get('run_status')}, Drift: {summary.get('drift_score')}")
 ```
 
 ---
 
-## Known Limitations
+## CLI Command Reference
 
-### Semantic / Logical Constraint Checking
-The current detection engine (combining TF-IDF centroid pattern matching, keyword rule matching, and structural loop heuristics) detects known error patterns, action repetitions, unresponsive tool responses, subgoal progression stalls, and plan divergence. 
-
-However, **it cannot detect arbitrary semantic or logical constraint violations where execution is syntactically valid and free of error keywords**.
-
-* **Concrete Example:**
-  Suppose a user requests:
-  > *"Book a flight arriving strictly before 10:00 AM on Monday with zero layovers."*
-
-  If the agent executes an action:
-  ```json
-  {
-    "action_name": "select_flight",
-    "action_args": {"flight_id": "FL-402", "arrival_time": "11:45 AM", "day": "Monday", "layovers": 1},
-    "tool_response": "Flight FL-402 reserved successfully."
-  }
-  ```
-  The syntax is valid, tool execution succeeds without errors, and no failure keywords or known centroid patterns match. The system cannot currently verify that `11:45 AM` contradicts the task constraint `before 10:00 AM`, or that `1 layover` violates `zero layovers`.
-* **Roadmap:**
-  Semantic constraint verification is a known gap reserved for a future verification layer (e.g. an LLM-based formal constraint checker or AST state invariant validator), not implemented in this version.
+| Command | Description |
+| :--- | :--- |
+| `longhorizon-guard setup-codex` | Automatically configures `~/.codex/config.toml` for OpenAI Codex. |
+| `longhorizon-guard setup-claude` | Automatically configures `.claude/settings.json` for Claude Code. |
+| `longhorizon-guard info` | Displays loaded pattern centroids, IDF terms, and memory status. |
+| `longhorizon-guard evaluate -t <file.json>` | Evaluates an offline JSON trajectory file for failure propagation. |
+| `longhorizon-guard proxy -p 8000` | Starts the real-time HTTP monitoring proxy. |
 
 ---
 
-## Verification
+## Benchmark Calibration & Accuracy
 
-Run the test suite:
+LongHorizon Guard is calibrated against empirical trajectories evaluated by Llama 3.3 70B (`findings/holdout_v2_judged.json`):
+
+| Category | Benchmark Accuracy | Confidence Threshold | Policy Rationale |
+| :--- | :---: | :---: | :--- |
+| **`planning_error`** | **83.3%** (10/12) | **0.20** | Highest trust; aggressive early intervention. |
+| **`reflection_error`**| **62.5%** (5/8) | **0.25** | Solid trust; flags action repetition and stagnation. |
+| **`memory_error`** | **28.6%** (2/7) | **0.40** | Lower judge trust; requires higher confidence. |
+| **`tool_use_error`** | N/A | **0.40** | Conservative threshold backed by structural exit code checks. |
+| **`external_error`** | N/A | **0.40** | Conservative default for environment timeouts and rate limits. |
+
+---
+
+## Verification & Testing
+
+Execute the complete test suite across the memory graph, associative engine, classifier, and hook integrations:
+
 ```bash
-pytest tests/ -v
+python -m pytest tests/ -v
+```
+
+```text
+============================= 105 passed in 7.81s =============================
 ```

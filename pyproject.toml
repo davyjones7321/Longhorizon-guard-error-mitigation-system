@@ -8,7 +8,9 @@ version = "0.2.0"
 description = "Long-horizon agent error mitigation system: taxonomy, tagger, pattern library, and drift monitor."
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "networkx>=3.0",
+]
 
 [project.optional-dependencies]
 dev = [

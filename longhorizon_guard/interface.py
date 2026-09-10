@@ -27,7 +27,7 @@ from longhorizon_guard.pattern_library.schema import PatternEntry
 from longhorizon_guard.pattern_library.store import load_patterns
 from longhorizon_guard.taxonomy.categories import DEFAULT_TAGS
 from longhorizon_guard.subgoals.tracker import SubgoalTracker
-from longhorizon_guard.subgoals.schema import SubgoalStatePayload
+from longhorizon_guard.subgoals.schema import SubgoalRecord, SubgoalStatePayload, SubgoalStatus
 from longhorizon_guard.drift_monitor.monitor import DriftMonitor
 from longhorizon_guard.drift_monitor.schema import DriftAssessment
 from longhorizon_guard.reflector.reflector import PlanReflector
@@ -1336,6 +1336,49 @@ class GuardInterface:
                     force=False,
                 )
                 result["reflection_result"] = refl_res.to_dict()
+
+            if self._memory_guard is not None and self._subgoal_tracker is not None:
+                new_active_subgoal = self._subgoal_tracker.active_subgoal
+                if new_active_subgoal is not None:
+                    real_completed = [
+                        s.description
+                        for s in self._subgoal_tracker.subgoals
+                        if s.status == SubgoalStatus.COMPLETED.value
+                    ]
+                    # Also include subgoal_ids to support matching against either description or ID
+                    for s in self._subgoal_tracker.subgoals:
+                        if s.status == SubgoalStatus.COMPLETED.value and s.subgoal_id not in real_completed:
+                            real_completed.append(s.subgoal_id)
+
+                    query = f"{new_active_subgoal.subgoal_id} {new_active_subgoal.description}"
+                    is_valid, missing = self._memory_guard.causal_graph.check_subgoal_prerequisites(
+                        real_completed, query
+                    )
+                    if not is_valid and missing:
+                        missing_str = ", ".join(missing)
+                        warn_msg = (
+                            f"[memory:prerequisite_violation] Subgoal '{new_active_subgoal.description}' "
+                            f"active before prerequisite(s) completed: {missing_str}"
+                        )
+                        sugg_msg = (
+                            f"Complete prerequisite(s) '{missing_str}' before proceeding with "
+                            f"'{new_active_subgoal.description}'."
+                        )
+                        logger.warning("prerequisite_violation_at_boundary: %s", warn_msg)
+                        if result.get("warning"):
+                            result["warning"] += f"; {warn_msg}"
+                        else:
+                            result["warning"] = warn_msg
+
+                        suggestions = result.setdefault("suggestions", [])
+                        if sugg_msg not in suggestions:
+                            suggestions.append(sugg_msg)
+
+                        result["prerequisite_violation"] = {
+                            "active_subgoal": new_active_subgoal.subgoal_id,
+                            "active_subgoal_description": new_active_subgoal.description,
+                            "missing_prerequisites": missing,
+                        }
 
         except Exception:
             logger.exception("on_subgoal_boundary error — failing open")

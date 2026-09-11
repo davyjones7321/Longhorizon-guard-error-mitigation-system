@@ -244,7 +244,7 @@ def _detect_agent_source(payload: Dict[str, Any]) -> str:
         return "claude_code_hook"
     if ".codex" in transcript_path or any(k.startswith("CODEX_") for k in os.environ):
         return "codex_hook"
-    return "codex_hook"
+    return "unknown_hook"
 
 
 def handle_hook(payload: Dict[str, Any], guard: Optional[GuardInterface] = None, log_dir: str = DEFAULT_HOOK_LOG_DIR) -> Dict[str, Any]:

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-from longhorizon_guard.hook import handle_hook, _extract_recent_plan_text
+from longhorizon_guard.hook import handle_hook, _extract_recent_plan_text, _detect_agent_source
 
 
 class TestHookIntegration(unittest.TestCase):
@@ -725,6 +725,16 @@ class TestHookIntegration(unittest.TestCase):
         self.assertIsNotNone(extracted)
         self.assertIn("Run unit test suite", extracted)
         self.assertIn("Verify test pass rate", extracted)
+
+    def test_detect_agent_source_fallback_unknown(self):
+        """Ensure generic harnesses fall back to 'unknown_hook' instead of 'codex_hook'."""
+        # Unrecognized harness payload
+        self.assertEqual(_detect_agent_source({}), "unknown_hook")
+        self.assertEqual(_detect_agent_source({"transcript_path": "some/generic/log.json"}), "unknown_hook")
+        # Explicit Claude Code detection
+        self.assertEqual(_detect_agent_source({"transcript_path": "/path/.claude/projects/t.json"}), "claude_code_hook")
+        # Explicit Codex detection
+        self.assertEqual(_detect_agent_source({"transcript_path": "/path/.codex/sessions/t.json"}), "codex_hook")
 
 
 if __name__ == "__main__":

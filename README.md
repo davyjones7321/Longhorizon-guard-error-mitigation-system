@@ -362,20 +362,6 @@ print(f"Run Outcome: {summary.get('run_status')}, Drift: {summary.get('drift_sco
 
 ---
 
-## Benchmark Calibration & Accuracy
-
-LongHorizon Guard is calibrated against empirical trajectories evaluated by Llama 3.3 70B (`findings/holdout_v2_judged.json`):
-
-| Category | Benchmark Accuracy | Confidence Threshold | Policy Rationale |
-| :--- | :---: | :---: | :--- |
-| **`planning_error`** | **83.3%** (10/12) | **0.20** | Highest trust; aggressive early intervention. |
-| **`reflection_error`**| **62.5%** (5/8) | **0.25** | Solid trust; flags action repetition and stagnation. |
-| **`memory_error`** | **28.6%** (2/7) | **0.40** | Lower judge trust; requires higher confidence. |
-| **`tool_use_error`** | N/A | **0.40** | Conservative threshold backed by structural exit code checks. |
-| **`external_error`** | N/A | **0.40** | Conservative default for environment timeouts and rate limits. |
-
----
-
 ## Verification & Testing
 
 Execute the complete test suite across the memory graph, associative engine, classifier, and hook integrations:

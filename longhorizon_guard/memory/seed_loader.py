@@ -173,9 +173,7 @@ def seed_error_cascades(causal_graph: CausalErrorGraph) -> int:
     """Seed empirical error transition and cascade dynamics."""
     cascades = [
         ("planning_error", "tool_use_error", 2, 0.65),
-        ("tool_use_error", "drift", 3, 0.72),
         ("memory_error", "tool_use_error", 1, 0.85),
-        ("drift", "reflection_error", 4, 0.80),
     ]
 
     for src, dst, lag, prob in cascades:

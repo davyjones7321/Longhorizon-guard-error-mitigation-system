@@ -44,9 +44,28 @@ class TestMemorySeedLoader:
     def test_seed_error_cascades(self):
         graph = CausalErrorGraph(storage_path=":memory:")
         count = seed_error_cascades(graph)
-        assert count > 0
+        assert count == 2
         summary = graph.summary()
-        assert summary["edges_by_type"].get("propagates_to", 0) >= 3
+        assert summary["edges_by_type"].get("propagates_to", 0) == 2
+
+    def test_fresh_guard_interface_seeded_graph_has_no_drift_category_node(self):
+        """Regression test: fresh GuardInterface with memory enabled must contain zero nodes with category 'drift'."""
+        from longhorizon_guard.config import GuardConfig
+        from longhorizon_guard.interface import GuardInterface
+
+        guard = GuardInterface(config=GuardConfig(enable_memory=True, memory_storage_path=":memory:"))
+        assert guard._memory_guard is not None
+        assert guard.memory_guard is not None
+
+        nodes = list(guard._memory_guard.causal_graph.graph.nodes(data=True))
+        assert len(nodes) > 0
+
+        drift_nodes = [
+            (nid, data)
+            for nid, data in nodes
+            if str(data.get("category", "")).strip().lower() == "drift"
+        ]
+        assert len(drift_nodes) == 0, f"Found nodes with category 'drift': {drift_nodes}"
 
     def test_bootstrap_memory_graph_and_associative_query(self):
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:

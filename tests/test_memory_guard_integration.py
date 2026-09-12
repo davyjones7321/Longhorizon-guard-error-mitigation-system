@@ -84,6 +84,43 @@ class TestMemoryGuardIntegration:
         summary_g = mg.causal_graph.summary()
         assert summary_g["total_nodes"] > 10
 
+    def test_on_run_end_with_high_drift_does_not_create_drift_category_node(self):
+        """Confirm on_run_end() with a high drift score no longer creates any graph node with category 'drift'."""
+        from longhorizon_guard.memory.memory_guard import MemoryGuard
+
+        mg = MemoryGuard(storage_path=":memory:", auto_bootstrap=False)
+        mg.working_memory.init_session(
+            task_description="API Integration task",
+            proposed_plan="1. Call API",
+            metadata={"run_id": "drift_test_001"},
+        )
+        # Force a high drift score (>= 0.50) in working memory
+        mg.working_memory.record_drift(step_index=0, drift_score=0.85, velocity=0.4, acceleration=0.2)
+
+        step_0 = {
+            "step_index": 0,
+            "action_name": "custom_api_tool",
+            "action_args": {"endpoint": "/v1/bad"},
+            "tool_response": "500 Internal Server Error",
+        }
+        mg.working_memory.record_step(step_0, has_error=True)
+
+        # Call on_run_end with root cause error
+        mg.on_run_end({
+            "run_id": "drift_test_001",
+            "task_description": "API Integration task",
+            "root_cause_error_type": "external_error",
+            "root_cause_step_index": 0,
+        })
+
+        # Inspect graph directly to confirm no node has category 'drift'
+        drift_nodes = [nid for nid, d in mg.causal_graph.graph.nodes(data=True) if d.get("category") == "drift"]
+        assert len(drift_nodes) == 0, f"Found unexpected drift nodes in causal graph: {drift_nodes}"
+
+        # Also confirm no cascade edge was created targeting 'drift'
+        for u, v in mg.causal_graph.graph.edges():
+            assert "drift" not in str(u) and "drift" not in str(v), f"Unexpected cascade edge involving drift: ({u}, {v})"
+
     def test_memory_flag_does_not_suppress_other_detection_layers(self):
         """Regression test: verify memory flags do not cause KeyError or suppress matcher/drift/reflector."""
         cfg = GuardConfig(enable_memory=True, memory_storage_path=":memory:", drift_threshold=0.01)

@@ -22,6 +22,7 @@ from longhorizon_guard.subgoals.schema import (
     SubgoalStatus,
     SubgoalStatePayload,
 )
+from longhorizon_guard.memory.capability_classifier import classify_action_capability
 
 logger = logging.getLogger("longhorizon_guard.guard")
 
@@ -193,9 +194,12 @@ def _check_step_outcome(
     combined_step_text = f"{reasoning} {action} {action_args} {tool_resp}"
 
     # --- Rule F1: Critical Failure Detection (F-07) ---
-    failure_term = _detect_tool_failure(tool_resp)
-    if failure_term:
-        return SubgoalStatus.FAILED.value, f"Step tool response contained failure keyword '{failure_term}'"
+    # Retrieval-type actions (webrun, search, browse) contain arbitrary web content in tool_response,
+    # not tool execution status. Skip keyword-based failure detection for information_retrieval.
+    if classify_action_capability(action) != "information_retrieval":
+        failure_term = _detect_tool_failure(tool_resp)
+        if failure_term:
+            return SubgoalStatus.FAILED.value, f"Step tool response contained failure keyword '{failure_term}'"
 
     # --- Rule S1: Alignment with Next Subgoal (Early Advancement) ---
     if next_subgoal:

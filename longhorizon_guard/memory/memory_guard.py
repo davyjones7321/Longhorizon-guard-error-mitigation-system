@@ -250,18 +250,6 @@ class MemoryGuard:
         root_cause_type = run_summary.get("root_cause_error_type")
         root_cause_step = run_summary.get("root_cause_step_index")
 
-        # If trajectory suffered a root cause error, record cascade relation
-        if root_cause_type and root_cause_step is not None:
-            # Check if there was downstream drift or tool error
-            if len(self.working_memory.drift_trajectory) > 0:
-                latest_drift = self.working_memory.get_latest_drift()
-                if latest_drift and latest_drift.get("drift_score", 0.0) >= 0.50:
-                    self.causal_graph.record_error_cascade(
-                        root_error_id_or_cat=root_cause_type,
-                        downstream_error_id_or_cat="drift",
-                        step_lag=max(1, len(self.working_memory.history) - root_cause_step),
-                    )
-
         # Index task description in concept index
         task_desc = self.working_memory.task_description
         if task_desc:

@@ -23,6 +23,14 @@ _ACTION_CAPABILITY_ALIASES = {
         "zsh",
         "powershell",
     ],
+    "information_retrieval": [
+        "webrun",
+        "web_search",
+        "websearch",
+        "search",
+        "browse",
+        "browser",
+    ],
 }
 
 

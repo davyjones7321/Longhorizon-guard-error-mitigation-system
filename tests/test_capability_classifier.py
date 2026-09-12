@@ -42,6 +42,24 @@ class TestActionCapabilityClassifier:
         assert classify_action_capability(tool_name) == "shell_execution"
 
     @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "webrun",
+            "web_search",
+            "websearch",
+            "search",
+            "browse",
+            "browser",
+            "Web-Search",
+            "WEBRUN",
+            "  search  ",
+            "browse",
+        ],
+    )
+    def test_information_retrieval_aliases(self, tool_name: str):
+        assert classify_action_capability(tool_name) == "information_retrieval"
+
+    @pytest.mark.parametrize(
         "non_matching_tool",
         [
             "edit_file",
@@ -49,7 +67,6 @@ class TestActionCapabilityClassifier:
             "git_commit",
             "read_url",
             "custom_linter",
-            "web_search",
             "",
             None,
         ],

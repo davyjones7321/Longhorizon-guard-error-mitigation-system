@@ -480,6 +480,49 @@ class TestRuleF1WordBoundariesAndBenignPhrasing:
             assert trans["completed_status"] == SubgoalStatus.FAILED.value
             assert "failure keyword" in trans["trigger_reason"]
 
+    def test_information_retrieval_action_skips_rule_f1(self):
+        """Information-retrieval actions (e.g. webrun) with retrieved content containing 'measurement error' must NOT fail."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Search literature for calibration methods\n2. Implement benchmark")
+        
+        # Real-world phrase that caused false failure: academic abstract mentioning 'measurement error'
+        search_response = (
+            "Title: Quantum Sensor Calibration under Noise. Abstract: We analyze measurement error "
+            "and state estimation uncertainty across long observation horizons."
+        )
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Searching academic literature",
+                "action_name": "webrun",
+                "tool_response": search_response,
+            },
+            history=[],
+        )
+        state = res["state_payload"]
+        assert state["status"] == SubgoalStatus.IN_PROGRESS.value
+        assert state["failed_subgoals_count"] == 0
+        assert res.get("transition_event") is None or res["transition_event"]["completed_status"] != SubgoalStatus.FAILED.value
+
+    def test_control_non_retrieval_action_with_error_still_fails_f1(self):
+        """Control test: non-retrieval tools (e.g. Bash) with error keywords must still trigger Rule F1 failure."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Execute build and test")
+        
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Running command",
+                "action_name": "Bash",
+                "tool_response": "Fatal measurement error: sensor hardware failed to initialize",
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.FAILED.value
+        assert "failure keyword" in trans["trigger_reason"]
+
 
 class TestConfigurableMaxSubgoalSteps:
     """Verify configurable max_subgoal_steps threshold (FIX F-08)."""

@@ -568,3 +568,126 @@ class TestConfigurableMaxSubgoalSteps:
         )
         assert res["transition_event"]["completed_status"] == SubgoalStatus.STALLED_ADVANCED.value
 
+
+class TestStructuralOutcomeDetection:
+    """Verify structural outcome detection (_detect_structural_outcome) in tracker._check_step_outcome."""
+
+    def test_returncode_0_completes_subgoal(self):
+        """tool_response containing <returncode>0</returncode> asserts 'completed'."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Run unit tests\n2. Next step")
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Executing tests",
+                "action_name": "bash",
+                "tool_response": "<returncode>0</returncode>\n<output>\nAll tests passed!\n</output>",
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.COMPLETED.value
+        assert "Structural success signal" in trans["trigger_reason"]
+        assert "returncode 0 / ok:true" in trans["trigger_reason"]
+
+    def test_returncode_nonzero_fails_subgoal(self):
+        """tool_response containing <returncode>127</returncode> asserts 'failed'."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Run unit tests\n2. Next step")
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Executing tests",
+                "action_name": "bash",
+                "tool_response": "<returncode>127</returncode>\n<output>\n/bin/sh: 1: rg: not found\n</output>",
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.FAILED.value
+        assert "Structural failure signal" in trans["trigger_reason"]
+        assert "non-zero returncode / ok:false" in trans["trigger_reason"]
+
+    def test_json_ok_true_completes_subgoal(self):
+        """tool_response as a JSON string with 'ok': true asserts 'completed'."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Read test file\n2. Modify test file")
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Reading file",
+                "action_name": "read_file",
+                "tool_response": '<tool_response>{"id": null, "ok": true, "stdout": {"content": "import sys"}}</tool_response>',
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.COMPLETED.value
+        assert "Structural success signal" in trans["trigger_reason"]
+        assert "returncode 0 / ok:true" in trans["trigger_reason"]
+
+    def test_json_ok_false_fails_subgoal(self):
+        """tool_response as a JSON string with 'ok': false asserts 'failed'."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Read test file\n2. Modify test file")
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Reading file",
+                "action_name": "read_file",
+                "tool_response": '{"ok": false, "error": "File not found: test.py"}',
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.FAILED.value
+        assert "Structural failure signal" in trans["trigger_reason"]
+        assert "non-zero returncode / ok:false" in trans["trigger_reason"]
+
+    def test_neither_pattern_falls_through_to_existing_rules_unchanged(self):
+        """A response with neither pattern present falls through to existing rules unchanged."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Run compiler\n2. Next step")
+        # Plain text containing a Rule F1 keyword 'syntax error'
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Compiling source code",
+                "action_name": "gcc",
+                "tool_response": "syntax error: unexpected token on line 42",
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.FAILED.value
+        assert "failure keyword" in trans["trigger_reason"]
+
+    def test_information_retrieval_with_embedded_returncode_skips_structural_check(self):
+        """information_retrieval action with coincidental <returncode>0</returncode> skips structural check."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Search documentation for shell returncodes\n2. Apply fix")
+        # Retrieved web documentation contains coincidental <returncode>0</returncode>
+        retrieved_content = (
+            "Blog Post: How shell returncodes work in SWE-bench.\n"
+            "Often agents see <returncode>0</returncode> when bash succeeds.\n"
+            "Here is more discussion about shell commands."
+        )
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Searching documentation",
+                "action_name": "webrun",
+                "tool_response": retrieved_content,
+            },
+            history=[],
+        )
+        # Structural check was skipped, F1 was skipped, no S1/S2 keywords matched -> stays in progress
+        state = res["state_payload"]
+        assert state["status"] == SubgoalStatus.IN_PROGRESS.value
+        assert res.get("transition_event") is None
+

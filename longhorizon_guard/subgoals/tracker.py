@@ -12,6 +12,7 @@ Design Principles:
   - Fail-Open: Graceful error handling; tracking failures never block execution.
 """
 
+import json
 import logging
 import re
 import time
@@ -173,6 +174,60 @@ def _detect_tool_failure(tool_resp: str) -> Optional[str]:
     return None
 
 
+_RETURNCODE_PATTERN = re.compile(r"<returncode>\s*(-?\d+)\s*</returncode>", re.IGNORECASE)
+
+
+def _detect_structural_outcome(tool_resp: Any) -> Optional[bool]:
+    r"""Detect structural success/failure signal from JSON ok field or returncode tags.
+
+    First, try to parse tool_resp as JSON (or extract the first top-level JSON object
+    within it, in case it's embedded in surrounding text). If it parses and has a key
+    literally named 'ok' with a boolean value, return that value directly.
+    Else, search for a <returncode> tag via regex (r"<returncode>\s*(-?\d+)\s*</returncode>").
+    If found, return True if the number is 0, False otherwise.
+    If neither pattern is found, return None.
+
+    Defensively wrapped: must never raise.
+    """
+    try:
+        if tool_resp is None:
+            return None
+
+        # 1. Try parsing tool_resp as JSON or extracting first top-level JSON object
+        if isinstance(tool_resp, dict):
+            if "ok" in tool_resp and isinstance(tool_resp["ok"], bool):
+                return tool_resp["ok"]
+        else:
+            s = str(tool_resp).strip()
+            # Try full string parse first
+            try:
+                obj = json.loads(s)
+                if isinstance(obj, dict) and "ok" in obj and isinstance(obj["ok"], bool):
+                    return obj["ok"]
+            except Exception:
+                pass
+
+            # If full string parse failed or didn't match, extract first top-level JSON object
+            start_idx = s.find("{")
+            if start_idx != -1:
+                try:
+                    obj, _ = json.JSONDecoder().raw_decode(s[start_idx:])
+                    if isinstance(obj, dict) and "ok" in obj and isinstance(obj["ok"], bool):
+                        return obj["ok"]
+                except Exception:
+                    pass
+
+        # 2. Search for <returncode> tag via regex
+        rc_match = _RETURNCODE_PATTERN.search(str(tool_resp))
+        if rc_match:
+            code = int(rc_match.group(1))
+            return code == 0
+
+        return None
+    except Exception:
+        return None
+
+
 def _check_step_outcome(
     step_record: Dict[str, Any],
     active_subgoal: SubgoalRecord,
@@ -186,12 +241,26 @@ def _check_step_outcome(
         (new_status, trigger_reason)
         Where new_status is one of: "in_progress", "completed", "failed", "stalled_advanced"
     """
-    tool_resp = str(step_record.get("tool_response") or "").lower()
+    raw_tool_resp = step_record.get("tool_response")
+    tool_resp = str(raw_tool_resp or "").lower()
     reasoning = str(step_record.get("reasoning") or "").lower()
     action = str(step_record.get("action_name") or "").lower()
     action_args = str(step_record.get("action_args") or "").lower()
 
     combined_step_text = f"{reasoning} {action} {action_args} {tool_resp}"
+
+    # --- Rule S0: Structural Outcome Detection (Highest Priority) ---
+    # Real coding-agent benchmarks (SWE-bench, SWE-Smith, ScienceAgentBench, Terminal-Bench-2)
+    # represent step success/failure structurally via <returncode>N</returncode> tags or
+    # a top-level {"ok": true/false} JSON response field.
+    # Retrieval-type actions (webrun, search, browse) contain arbitrary retrieved web content
+    # that could coincidentally mention return codes or ok fields. Skip this check for them.
+    if classify_action_capability(action) != "information_retrieval":
+        structural_outcome = _detect_structural_outcome(raw_tool_resp)
+        if structural_outcome is True:
+            return SubgoalStatus.COMPLETED.value, "Structural success signal (returncode 0 / ok:true)"
+        elif structural_outcome is False:
+            return SubgoalStatus.FAILED.value, "Structural failure signal (non-zero returncode / ok:false)"
 
     # --- Rule F1: Critical Failure Detection (F-07) ---
     # Retrieval-type actions (webrun, search, browse) contain arbitrary web content in tool_response,

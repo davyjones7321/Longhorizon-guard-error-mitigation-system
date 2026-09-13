@@ -257,10 +257,17 @@ def _check_step_outcome(
     # that could coincidentally mention return codes or ok fields. Skip this check for them.
     if classify_action_capability(action) != "information_retrieval":
         structural_outcome = _detect_structural_outcome(raw_tool_resp)
-        if structural_outcome is True:
-            return SubgoalStatus.COMPLETED.value, "Structural success signal (returncode 0 / ok:true)"
-        elif structural_outcome is False:
+        if structural_outcome is False:
             return SubgoalStatus.FAILED.value, "Structural failure signal (non-zero returncode / ok:false)"
+        elif structural_outcome is True:
+            # Asymmetric Rule S0: A positive structural signal (ok: true / returncode 0) indicates
+            # the tool invocation did not crash, but the operation might still have failed internally
+            # (e.g. top-level "ok": true with nested "success": false / "error": "Invalid image source").
+            # Corroborate with Rule F1 failure-keyword detection before granting completion.
+            failure_term = _detect_tool_failure(tool_resp)
+            if failure_term:
+                return SubgoalStatus.FAILED.value, f"Step tool response contained failure keyword '{failure_term}'"
+            return SubgoalStatus.COMPLETED.value, "Structural success signal (returncode 0 / ok:true)"
 
     # --- Rule F1: Critical Failure Detection (F-07) ---
     # Retrieval-type actions (webrun, search, browse) contain arbitrary web content in tool_response,

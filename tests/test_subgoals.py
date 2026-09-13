@@ -629,6 +629,28 @@ class TestStructuralOutcomeDetection:
         assert "Structural success signal" in trans["trigger_reason"]
         assert "returncode 0 / ok:true" in trans["trigger_reason"]
 
+    def test_json_ok_true_with_nested_failure_returns_failed(self):
+        """Real edge case from terminal-bench-2: top-level ok: true with nested failure/error must return FAILED."""
+        tracker = SubgoalTracker()
+        tracker.init_plan("Task", "1. Analyze chess board image\n2. Output best move")
+        real_tb2_response = (
+            '{"id": null, "ok": true, "stdout": {"success": false, "error": "Error analyzing image: '
+            'Invalid image source. Provide an HTTP/HTTPS URL or a valid local file path.", "analysis": ""}}'
+        )
+        res = tracker.process_step(
+            {
+                "step_index": 0,
+                "reasoning": "Analyzing image with vision tool",
+                "action_name": "vision_analyze",
+                "tool_response": real_tb2_response,
+            },
+            history=[],
+        )
+        trans = res["transition_event"]
+        assert trans is not None
+        assert trans["completed_status"] == SubgoalStatus.FAILED.value
+        assert "failure keyword" in trans["trigger_reason"]
+
     def test_json_ok_false_fails_subgoal(self):
         """tool_response as a JSON string with 'ok': false asserts 'failed'."""
         tracker = SubgoalTracker()

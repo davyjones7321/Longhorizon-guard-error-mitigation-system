@@ -171,14 +171,15 @@ Your task is to:
 ### Required Output JSON Format
 You MUST respond with valid JSON matching this exact structure:
 {
-  "confirmed_divergence_step_success": <int>,
-  "confirmed_divergence_step_failure": <int>,
+  "confirmed_divergence_step_success": <int or null if no actions/responses taken>,
+  "confirmed_divergence_step_failure": <int or null if no actions/responses taken>,
   "root_cause_error_type": "<one of the 7 taxonomy categories>",
   "confidence": <float between 0.0 and 1.0>,
   "chain_of_thought": "<Detailed explanation: what failure did at divergence, what success did instead, and why failure's choice was wrong>",
   "what_succeeded_did_differently": "<Concise description of the successful strategy or action difference>"
 }
 """
+
 
 
 
@@ -683,10 +684,84 @@ async def judge_comparison(
     model: Optional[str] = None,
     semaphore: Optional[asyncio.Semaphore] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Invokes LLM in comparison mode to analyze a success/failure trajectory pair."""
+    """Invokes LLM in comparison mode to analyze a success/failure trajectory pair.
+
+    Option 1: Pre-filter guard + sentinel flags + safety clamp fallback:
+    - If either trajectory has 0 response/action ('gpt') turns (e.g. tune-mjcf in the 25
+      hermes-vs-hermes pairs, or vulnerable-secret in the pi-mono-vs-hermes pairs), skip the
+      LLM call entirely and synthesize a deterministic planning_error record.
+      Note: vulnerable-secret (pair #10) is a pi-mono-vs-hermes pair, outside the 25 currently-judged
+      hermes-vs-hermes pairs — this guard will handle it correctly when pi-mono pairs are revisited,
+      but won't fire in the hermes-vs-hermes run.
+    - Emits null for the corresponding confirmed_divergence_step and sets explicit sentinels:
+      no_response_failure: bool, no_response_success: bool.
+    - For LLM-judged records, applies a safety clamp fallback: min(idx, len(conv) - 1).
+    """
     if semaphore is None:
         semaphore = asyncio.Semaphore(1)
-        
+
+    task_id = pair.get("task_id")
+    succ = pair.get("success", {})
+    fail = pair.get("failure", {})
+    succ_conv = succ.get("conversations", [])
+    fail_conv = fail.get("conversations", [])
+
+    # Count agent action/response turns ('gpt')
+    s_gpt_count = sum(1 for t in succ_conv if (t.get("from") or t.get("role")) == "gpt")
+    f_gpt_count = sum(1 for t in fail_conv if (t.get("from") or t.get("role")) == "gpt")
+
+    no_resp_succ = (s_gpt_count == 0)
+    no_resp_fail = (f_gpt_count == 0)
+
+    # --- Pre-filter guard for zero-gpt trajectories ---
+    if no_resp_fail or no_resp_succ:
+        if no_resp_fail and not no_resp_succ:
+            cot = (
+                f"The failure trajectory contains 0 agent response turns (only system and human instructions). "
+                f"The agent never issued any plan, tool calls, or actions before termination. "
+                f"This is an omission of the initial execution and planning phase, constituting a planning_error."
+            )
+            what_diff = (
+                f"The successful run actively executed actions to solve the task, "
+                f"whereas the failing run terminated without emitting any response or taking any action."
+            )
+            # Success divergence points to its first action or candidate turn
+            div_s = divergence_info.get("divergence_turn_success")
+            if div_s is not None and len(succ_conv) > 0:
+                div_s = min(max(0, div_s), len(succ_conv) - 1)
+            elif len(succ_conv) > 0:
+                div_s = 0
+            else:
+                div_s = None
+
+            return {
+                "task_id": task_id,
+                "confirmed_divergence_step_success": div_s,
+                "confirmed_divergence_step_failure": None,
+                "no_response_failure": True,
+                "no_response_success": False,
+                "root_cause_error_type": "planning_error",
+                "confidence": 1.0,
+                "chain_of_thought": cot,
+                "what_succeeded_did_differently": what_diff,
+                "provider_used": "pre-filter guard (deterministic)",
+                "verification_status": "Judge's comparison output, not yet independently verified"
+            }
+        elif no_resp_succ and not no_resp_fail:
+            return {
+                "task_id": task_id,
+                "confirmed_divergence_step_success": None,
+                "confirmed_divergence_step_failure": min(max(0, divergence_info.get("divergence_turn_failure", 0)), len(fail_conv) - 1) if fail_conv else None,
+                "no_response_failure": False,
+                "no_response_success": True,
+                "root_cause_error_type": "grader_error",
+                "confidence": 1.0,
+                "chain_of_thought": "The success trajectory succeeded with 0 actions, likely an evaluator or environment state anomaly.",
+                "what_succeeded_did_differently": "Success required 0 actions to satisfy grader.",
+                "provider_used": "pre-filter guard (deterministic)",
+                "verification_status": "Judge's comparison output, not yet independently verified"
+            }
+
     payload = prepare_comparison_payload(pair, divergence_info)
     prompt = (
         f"{JUDGE_COMPARISON_PROMPT}\n\n"
@@ -694,19 +769,37 @@ async def judge_comparison(
         f"{json.dumps(payload, indent=2)}\n\n"
         f"Output JSON:"
     )
-    
+
     res = await call_llm(
         prompt=prompt,
         provider=provider,
         semaphore=semaphore,
         model=model,
     )
-    
+
     if res and isinstance(res, dict):
-        res["task_id"] = pair.get("task_id")
+        res["task_id"] = task_id
+        res["no_response_failure"] = False
+        res["no_response_success"] = False
+
+        # --- Safety clamp fallback: ensure indices never exceed conversation boundaries ---
+        s_step = res.get("confirmed_divergence_step_success")
+        if s_step is not None:
+            if len(succ_conv) == 0:
+                res["confirmed_divergence_step_success"] = None
+            else:
+                res["confirmed_divergence_step_success"] = min(max(0, int(s_step)), len(succ_conv) - 1)
+
+        f_step = res.get("confirmed_divergence_step_failure")
+        if f_step is not None:
+            if len(fail_conv) == 0:
+                res["confirmed_divergence_step_failure"] = None
+            else:
+                res["confirmed_divergence_step_failure"] = min(max(0, int(f_step)), len(fail_conv) - 1)
+
         res["verification_status"] = "Judge's comparison output, not yet independently verified"
         return res
-        
+
     return None
 
 

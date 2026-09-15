@@ -102,6 +102,85 @@ You MUST respond with valid JSON matching this exact structure:
 }
 """
 
+JUDGE_COMPARISON_PROMPT = """You are an expert AI agent failure auditor specializing in comparative root-cause error analysis.
+
+You are given two trajectories attempting the EXACT SAME task:
+1. SUCCESS trajectory: successfully solved the task (grade_pass = True).
+2. FAILURE trajectory: failed to solve the task (grade_pass = False).
+
+You are also provided with a candidate divergence window computed by structural diffing.
+Note: the structural pre-filter is a candidate, not authoritative. The real divergence in agent reasoning or intent may be a step or two earlier or later than where action syntax first diverges.
+
+Your task is to:
+1. Confirm or refine the actual divergence step index for both the success and failure trajectories.
+2. Classify the failing trajectory's root-cause error using the standardized 7-category taxonomy.
+3. Produce a clear chain-of-thought explaining:
+   - What the failure trajectory did at divergence.
+   - What the success trajectory did instead.
+   - Why the failure's choice was wrong (the reasoning or execution gap).
+4. Explicitly describe what the success trajectory did differently.
+
+### Standardized Error Taxonomy (7 Categories)
+
+1. planning_error:
+   - Definition: The agent formulated an incorrect overall strategy, sequence, or approach.
+   - EXCEPTION OVERRIDE: An incomplete initial plan (e.g. omitting a sub-goal like 'clean') is NOT planning_error if the agent later had an opportunity to observe the environment and verify state. In such cases, tag reflection_error at the observation step, NOT planning_error at Step 0.
+2. reflection_error:
+   - Definition: The agent failed to evaluate tool output, misjudged environment state, misinterpreted task completion, or failed to recognize an incomplete/incorrect outcome after observing environment feedback.
+3. tool_use_error:
+   - Definition: The agent selected an invalid tool, formatted arguments incorrectly, passed invalid parameters, or omitted required parameters/constraints in a tool call.
+4. memory_error:
+   - Definition: The agent forgot previously observed information, duplicated actions in a loop, or lost context over long horizons.
+5. external_error:
+   - Definition: Failures caused by system limits, environment cutoffs, network timeouts, or tool execution errors outside agent control.
+6. grader_error:
+   - Definition: The agent succeeded according to task requirements, but the automated evaluator incorrectly graded it as a failure.
+7. other:
+   - Definition: Ambiguous failure or edge-case error not cleanly covered by the above 6 categories.
+
+### Root-Cause Disambiguation & Primacy Rules
+1. Mechanical Step Limit Override (HIGHEST PRIORITY):
+   - Check final_status and grader_notes FIRST.
+   - ONLY if grader_notes or final_status unambiguously indicates that an environment- or system-imposed step/turn limit was reached before task completion (e.g., 'step limit reached', 'max steps cap', 'max turns hit', 'timeout limit'), you MUST tag root_cause_error_type as external_error.
+   - Do NOT tag external_error merely because words like 'limit' or 'truncated' appear in text if an actual turn/step cutoff did not cause the termination.
+   - Do NOT evaluate whether the agent's behavior during those steps seems inefficient, looped, or planning-flawed — the mechanical termination mechanism determines this tag. This check takes priority over all other rules in this prompt.
+2. Reflection Error Precedence over Initial Plan Text (CRITICAL):
+   - Do NOT tag planning_error at Step 0 merely because the agent's initial written plan or reasoning block omitted a required sub-step (e.g., 'clean').
+   - An initial plan omission is ONLY a planning_error if the agent NEVER received any subsequent observation or feedback before declaring the task done.
+   - If the agent later observed environment state (e.g. picked up, inspected, or placed an object, or received product options) and had feedback available at that point to recognize the task was incomplete but failed to do so, you MUST tag root_cause_error_type as reflection_error at that later observation step — REGARDLESS of what the initial plan stated or omitted at Step 0.
+3. Environment vs. Agent Causality:
+   - If Step K's tool execution returned erroneous, corrupted, or misleading output despite a valid agent request, mark STEP K as the root cause (external_error).
+   - If Step K's tool output contained valid choices and the agent picked the wrong one at Step K+1, mark STEP K+1 as the root cause (tool_use_error or planning_error).
+4. Action Parameter Omission vs. Planning (Pattern A - ABSOLUTE PRIORITY):
+   - You MUST tag tool_use_error at the action step whenever a search query or action parameter omits a required term, includes a conflicting term (e.g. 'men' and 'women'), or uses improper search keywords.
+   - Do NOT tag planning_error for search query formulation or parameter wording errors under ANY circumstances — even if the search query terms appear inside an initial reasoning, thinking, or plan block at step 0.
+   - Reserve planning_error strictly for cases where the agent selected the wrong high-level action category (e.g. clicking 'buy' before searching), NOT for search query terms or parameter values.
+5. Earliest Point of Failure (Primacy):
+   - Always assign root_cause_step_index to the EARLIEST step where the trajectory deviated from a valid path to task completion.
+   - Do NOT mark downstream cascading errors as the root cause.
+6. Grader Error Constraint:
+   - You MAY ONLY assign grader_error if there is explicit evidence in grader_notes or trajectory output showing that the agent's final answer was objectively correct according to the task description, but was erroneously marked as a failure.
+   - If grader_notes or ground-truth details are absent or unverified, NEVER assign grader_error; assign other or the execution error instead.
+7. Precise Planning Error Step Indexing Rule:
+   - For planning_error, tag the exact step index where the flawed plan, invalid search query, or inadmissible action was generated or executed by the agent (e.g. Step 3, Step 6, Step 9, Step 10).
+   - Do NOT default planning_error to Step 0 unless the initial prompt plan itself was the sole root cause.
+8. Mandatory Reflection Error Override on Mid-Trajectory Observations:
+   - If the trajectory contains any intermediate step where the agent observed environment output (e.g. inspected an object, searched a location, or received search results) and failed to update its goal or recognize an incomplete state, tag reflection_error at that observation step.
+   - You MUST tag reflection_error even if the initial plan at Step 0 was incomplete or flawed.
+
+### Required Output JSON Format
+You MUST respond with valid JSON matching this exact structure:
+{
+  "confirmed_divergence_step_success": <int>,
+  "confirmed_divergence_step_failure": <int>,
+  "root_cause_error_type": "<one of the 7 taxonomy categories>",
+  "confidence": <float between 0.0 and 1.0>,
+  "chain_of_thought": "<Detailed explanation: what failure did at divergence, what success did instead, and why failure's choice was wrong>",
+  "what_succeeded_did_differently": "<Concise description of the successful strategy or action difference>"
+}
+"""
+
+
 
 def _truncate_field(text, max_len: int) -> str:
     if text is None:
@@ -515,6 +594,123 @@ def main() -> None:
     asyncio.run(main_async(args))
 
 
+def _extract_turn_content_for_comparison(turn: Dict[str, Any], max_len: int = 400) -> Dict[str, Any]:
+    """Helper to extract and truncate content from a ShareGPT turn for comparison payload."""
+    role = turn.get("from") or turn.get("role")
+    val = str(turn.get("value") or turn.get("content") or "")
+    if len(val) > max_len:
+        val = val[:max_len] + f"...[TRUNCATED, {len(val)} chars total]"
+    return {
+        "role": role,
+        "content": val
+    }
+
+
+def prepare_comparison_payload(pair: Dict[str, Any], divergence_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Prepares a focused window payload around the divergence point for comparison mode."""
+    task_id = pair.get("task_id")
+    bench = pair.get("bench")
+    
+    succ = pair.get("success", {})
+    fail = pair.get("failure", {})
+    
+    succ_conv = succ.get("conversations", [])
+    fail_conv = fail.get("conversations", [])
+    
+    # Task prompt / instruction is typically in the first human turn
+    instruction = ""
+    for turn in succ_conv:
+        role = turn.get("from") or turn.get("role")
+        if role in ("human", "user"):
+            instruction = str(turn.get("value") or turn.get("content") or "")
+            if len(instruction) > 1000:
+                instruction = instruction[:1000] + "...[TRUNCATED]"
+            break
+            
+    div_s_act = divergence_info.get("divergence_action_idx_success", 0)
+    div_f_act = divergence_info.get("divergence_action_idx_failure", 0)
+    div_s_turn = divergence_info.get("divergence_turn_success", 0)
+    div_f_turn = divergence_info.get("divergence_turn_failure", 0)
+    
+    # Build a window of turns around divergence (2 turns before, up to 6 turns after)
+    s_start = max(0, div_s_turn - 2)
+    s_end = min(len(succ_conv), div_s_turn + 8)
+    succ_window = [
+        {"turn_index": idx, **_extract_turn_content_for_comparison(succ_conv[idx])}
+        for idx in range(s_start, s_end)
+    ]
+    
+    f_start = max(0, div_f_turn - 2)
+    f_end = min(len(fail_conv), div_f_turn + 8)
+    fail_window = [
+        {"turn_index": idx, **_extract_turn_content_for_comparison(fail_conv[idx])}
+        for idx in range(f_start, f_end)
+    ]
+    
+    return {
+        "task_id": task_id,
+        "benchmark": bench,
+        "task_instruction": instruction,
+        "candidate_divergence": {
+            "success_action_index": div_s_act,
+            "failure_action_index": div_f_act,
+            "success_turn_index": div_s_turn,
+            "failure_turn_index": div_f_turn,
+            "matching_blocks": divergence_info.get("matching_blocks", []),
+        },
+        "success_trajectory": {
+            "agent": succ.get("agent"),
+            "model": succ.get("model"),
+            "grade_pass": succ.get("grade_pass"),
+            "total_turns": len(succ_conv),
+            "divergence_window_turns": succ_window
+        },
+        "failure_trajectory": {
+            "agent": fail.get("agent"),
+            "model": fail.get("model"),
+            "grade_pass": fail.get("grade_pass"),
+            "grade_reason": fail.get("grade_reason"),
+            "total_turns": len(fail_conv),
+            "divergence_window_turns": fail_window
+        }
+    }
+
+
+async def judge_comparison(
+    pair: Dict[str, Any],
+    divergence_info: Dict[str, Any],
+    provider: str = "groq",
+    model: Optional[str] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Optional[Dict[str, Any]]:
+    """Invokes LLM in comparison mode to analyze a success/failure trajectory pair."""
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(1)
+        
+    payload = prepare_comparison_payload(pair, divergence_info)
+    prompt = (
+        f"{JUDGE_COMPARISON_PROMPT}\n\n"
+        f"Analyze this trajectory pair and candidate divergence window:\n"
+        f"{json.dumps(payload, indent=2)}\n\n"
+        f"Output JSON:"
+    )
+    
+    res = await call_llm(
+        prompt=prompt,
+        provider=provider,
+        semaphore=semaphore,
+        model=model,
+    )
+    
+    if res and isinstance(res, dict):
+        res["task_id"] = pair.get("task_id")
+        res["verification_status"] = "Judge's comparison output, not yet independently verified"
+        return res
+        
+    return None
+
+
 if __name__ == "__main__":
     main()
+
 

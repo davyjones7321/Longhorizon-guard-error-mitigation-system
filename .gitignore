@@ -85,6 +85,7 @@ findings/*
 scratch/
 output/
 parsed-data/
+new_dataset/
 sorted.json
 agenterrorbench_judged.json
 antigravity_sessions.json

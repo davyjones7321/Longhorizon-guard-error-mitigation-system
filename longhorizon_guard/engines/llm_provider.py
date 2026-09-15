@@ -392,7 +392,7 @@ async def _call_groq(
         "User-Agent": "curl/8.0.1",
     }
 
-    for attempt in range(2):
+    for attempt in range(5):
         try:
             req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
             resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=30)
@@ -403,9 +403,14 @@ async def _call_groq(
                 match = re.search(r"\{.*\}", text_content, re.DOTALL)
                 if match:
                     return json.loads(match.group(0))
+        except urllib.error.HTTPError as exc:
+            retry_after = exc.headers.get("Retry-After")
+            wait_s = float(retry_after) if retry_after else (3.0 * (attempt + 1))
+            print(f"Groq API call attempt {attempt + 1} hit HTTP {exc.code}, waiting {wait_s:.1f}s...", file=sys.stderr)
+            await asyncio.sleep(wait_s + 0.5)
         except Exception as exc:
             print(f"Groq API call attempt {attempt + 1} failed: {exc}", file=sys.stderr)
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(3.0 * (attempt + 1))
     return None
 
 

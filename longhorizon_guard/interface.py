@@ -34,6 +34,12 @@ from longhorizon_guard.reflector.reflector import PlanReflector
 from longhorizon_guard.reflector.schema import ReflectionResult
 
 from longhorizon_guard.config import GuardConfig
+from longhorizon_guard.heredoc import (
+    bash_heredoc_spans,
+    powershell_herestring_spans,
+    mask_spans,
+    mask_command_heredocs,
+)
 
 logger = logging.getLogger("longhorizon_guard.guard")
 
@@ -1091,7 +1097,8 @@ class GuardInterface:
                 # Excludes tool_response to prevent environment prompt boilerplate false matches
                 reasoning = step_record.get("reasoning", "") or ""
                 action_name = step_record.get("action_name", "") or ""
-                action_args = str(step_record.get("action_args", "")) or ""
+                action_args_raw = step_record.get("action_args", "")
+                action_args = mask_command_heredocs(action_args_raw)
 
                 combined_text = f"{reasoning} {action_name} {action_args}"
 

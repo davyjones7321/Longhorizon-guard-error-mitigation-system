@@ -12,6 +12,11 @@ from longhorizon_guard.reflector.reflector import PlanReflector
 from longhorizon_guard.integrations.client_wrapper import wrap_guard
 from longhorizon_guard.integrations.langchain_callback import LongHorizonGuardCallback
 from longhorizon_guard.proxy import run_proxy
+from longhorizon_guard.heredoc import (
+    bash_heredoc_spans,
+    powershell_herestring_spans,
+    mask_spans,
+)
 
 __all__ = [
     "__version__",
@@ -23,4 +28,7 @@ __all__ = [
     "wrap_guard",
     "LongHorizonGuardCallback",
     "run_proxy",
+    "bash_heredoc_spans",
+    "powershell_herestring_spans",
+    "mask_spans",
 ]
